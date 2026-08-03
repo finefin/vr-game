@@ -3,6 +3,8 @@ window.AudioEngine = (function () {
   var master = null;
   var noiseBuf = null;
   var zeroTime = 0;
+  var songBuffer = null;
+  var src = null;
 
   var BPM = 112;
   var BEAT = 60 / BPM;
@@ -23,6 +25,22 @@ window.AudioEngine = (function () {
 
   function time() {
     return ctx ? ctx.currentTime - zeroTime : 0;
+  }
+
+  function stopSrc() {
+    if (src) {
+      try { src.stop(); } catch (e) {}
+      src = null;
+    }
+  }
+
+  function decode(arrayBuffer, onOk, onErr) {
+    ensure();
+    ctx.decodeAudioData(arrayBuffer, onOk, onErr || function () {});
+  }
+
+  function setSong(buffer) {
+    songBuffer = buffer;
   }
 
   function tone(type, freq, t, dur, vol) {
@@ -106,9 +124,22 @@ window.AudioEngine = (function () {
     start: function () {
       ensure();
       if (ctx.state === 'suspended') ctx.resume();
-      schedule();
+      stopSrc();
+      if (songBuffer) {
+        src = ctx.createBufferSource();
+        src.buffer = songBuffer;
+        src.connect(master);
+        zeroTime = ctx.currentTime + 0.05;
+        src.start(zeroTime);
+      } else {
+        schedule();
+      }
     },
     time: time,
-    endTime: BARS * BAR_DUR + 2 * BEAT
+    decode: decode,
+    setSong: setSong,
+    endTime: function () {
+      return songBuffer ? songBuffer.duration : BARS * BAR_DUR + 2 * BEAT;
+    }
   };
 })();

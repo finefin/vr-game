@@ -13,7 +13,7 @@ window.Game = {
   _at: 0,
 
   laneX: [-1.2, -0.4, 0.4, 1.2],
-  HEIGHT: 1.6,
+  HEIGHT: 1.8,
   SPAWN_Z: 18,
   LEAD_TIME: 1.5,
   PASS_Z: 1.2,
@@ -45,11 +45,18 @@ window.Game = {
     var self = this;
     fetch('beatmaps/demo.json')
       .then(function (r) { return r.json(); })
-      .then(function (json) {
-        self.chart = json;
-        self.total = json.notes.length;
-      })
+      .then(function (json) { self.loadChart(json); })
       .catch(function (e) { console.error('beatmap load failed', e); });
+  },
+
+  loadChart: function (chart) {
+    this.chart = chart;
+    this.total = chart.notes.length;
+    this.setStartEnabled(true);
+  },
+
+  setStartEnabled: function (enabled) {
+    if (this.startBtn) this.startBtn.disabled = !enabled;
   },
 
   start: function () {
@@ -76,13 +83,13 @@ window.Game = {
     while (this.spawnIdx < list.length && list[this.spawnIdx].t <= at + this.LEAD_TIME) {
       this.spawnNote(list[this.spawnIdx++]);
     }
-    if (at > AudioEngine.endTime) this.end();
+    if (at > AudioEngine.endTime()) this.end();
   },
 
   spawnNote: function (d) {
     var el = document.createElement('a-box');
     el.setAttribute('geometry', { width: 0.35, height: 0.35, depth: 0.35 });
-    el.setAttribute('note', { lane: d.lane, color: d.color, time: d.t });
+    el.setAttribute('note', { lane: d.lane, color: d.color, time: d.t, y: d.y || this.HEIGHT });
     this.notesEl.appendChild(el);
     this.notes.push({
       el: el,

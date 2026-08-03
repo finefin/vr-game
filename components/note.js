@@ -2,7 +2,8 @@ AFRAME.registerComponent('note', {
   schema: {
     lane: { type: 'int', default: 0 },
     color: { type: 'string', default: 'red' },
-    time: { type: 'number', default: 0 }
+    time: { type: 'number', default: 0 },
+    y: { type: 'number', default: 1.8 }
   },
 
   init: function () {
@@ -11,8 +12,12 @@ AFRAME.registerComponent('note', {
     this.el.setAttribute('material', { shader: 'flat', color: hex });
     this.el.object3D.position.set(
       Game.laneX[this.data.lane],
-      Game.HEIGHT,
+      this.data.y,
       -Game.SPAWN_Z
+    );
+    this.el.object3D.quaternion.setFromAxisAngle(
+      new THREE.Vector3(-1, 0, 1).normalize(),
+      0.9553166
     );
   },
 
