@@ -357,7 +357,7 @@ window.Editor = (function () {
     else if (which === 'right') n.lane = Math.min(3, n.lane + 1);
     else if (which === 'up') n.t = Math.max(0, n.t - 0.5);
     else if (which === 'down') n.t = n.t + 0.5;
-    else if (which === 'hup') n.y = Math.min(4, (n.y || defaultY) + 0.1);
+    else if (which === 'hup') n.y = Math.min(2.5, (n.y || defaultY) + 0.1);
     else if (which === 'hdown') n.y = Math.max(1, (n.y || defaultY) - 0.1);
     sortNotes();
     render();
@@ -366,7 +366,7 @@ window.Editor = (function () {
   function randomizeY() {
     if (!chart || !chart.notes.length) return;
     for (var i = 0; i < chart.notes.length; i++) {
-      chart.notes[i].y = Math.round((1 + Math.random() * 3) * 10) / 10;
+      chart.notes[i].y = Math.round((1 + Math.random() * 1.5) * 10) / 10;
     }
     render();
   }
