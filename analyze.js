@@ -273,11 +273,22 @@
     markTriplets(out);
     if (out.length > MAX_NOTES) out = thin(out);
     assignLanes(out);
+    assignDirs(out);
     var chart = [];
     for (i = 0; i < out.length; i++) {
-      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y });
+      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y, dir: out[i].dir });
     }
     return { bpm: bpm, source: 'mp3', system: 'fft', notes: chart };
+  }
+
+  var DIR_LIST = ['l', 'r', 'u', 'd', 'bl', 'br', 'tl', 'tr'];
+
+  function assignDirs(arr) {
+    for (var i = 0; i < arr.length; i++) {
+      if (!arr[i].dir) {
+        arr[i].dir = DIR_LIST[Math.floor(Math.random() * DIR_LIST.length)];
+      }
+    }
   }
 
   function balanceSplit(arr) {
@@ -327,9 +338,10 @@
     if (out.length > MAX_NOTES) out = thin(out);
     balanceSplit(out);
     assignLanesSplit(out);
+    assignDirs(out);
     var chart = [];
     for (i = 0; i < out.length; i++) {
-      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y });
+      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y, dir: out[i].dir });
     }
     return { bpm: bpm, source: 'mp3', system: 'essentia', notes: chart };
   }
@@ -793,39 +805,58 @@
     },
     handleFile: function (file) {
       if (!file) return;
-      if (window.Game && window.Game.setStartEnabled) window.Game.setStartEnabled(false);
       var reader = new FileReader();
       reader.onload = function (e) {
-        setStatus('Analyzing "' + file.name + '"...');
-        AudioEngine.decode(e.target.result, function (buffer) {
-          AudioEngine.setSong(buffer);
-          analyze(buffer, function (chart) {
-            var sys = chart.system === 'essentia' ? 'essentia' : 'fallback FFT';
-            console.log('[Analyzer] beatmap generated with ' + sys + ' — ' + chart.notes.length + ' notes' + (chart.bpm ? ', ' + Math.round(chart.bpm) + ' BPM' : ''));
-            var buckets = {}, k;
-            for (k = 0; k < chart.notes.length; k++) {
-              var nn = chart.notes[k];
-              var b = Math.floor(nn.t / 20) * 20;
-              buckets[b] = buckets[b] || { red: 0, blue: 0 };
-              if (nn.color === 'red') buckets[b].red++; else buckets[b].blue++;
-            }
-            var parts = [];
-            if (chart.notes.length) {
-              for (k = 0; k <= Math.floor(chart.notes[chart.notes.length - 1].t / 20) * 20; k += 20) {
-                if (buckets[k]) parts.push(k + 's:R' + buckets[k].red + '/B' + buckets[k].blue);
-              }
-            }
-            console.log('[Analyzer] color mix per 20s: ' + parts.join('  '));
-            Game.loadChart(chart);
-            setStatus('Ready — ' + chart.notes.length + ' notes' + (chart.bpm ? ' @ ' + Math.round(chart.bpm) + ' BPM' : '') + '. Press Start.');
-            setSystem('Analysis engine: ' + sys);
-          });
-        }, function () {
-          setStatus('Could not decode that audio file.');
-          if (window.Game && window.Game.setStartEnabled) window.Game.setStartEnabled(true);
-        });
-      };
+        this.loadBuffer(e.target.result, file.name);
+      }.bind(this);
       reader.readAsArrayBuffer(file);
+    },
+    loadUrl: function (url, name, onError) {
+      fetch(url)
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.arrayBuffer();
+        })
+        .then(function (buf) {
+          this.loadBuffer(buf, name || url);
+        }.bind(this))
+        .catch(function (err) {
+          console.error('[Analyzer] failed to load ' + url, err);
+          setStatus('Could not load ' + url + '.');
+          if (window.Game && window.Game.setStartEnabled) window.Game.setStartEnabled(true);
+          if (onError) onError(err);
+        });
+    },
+    loadBuffer: function (arrayBuffer, name) {
+      if (window.Game && window.Game.setStartEnabled) window.Game.setStartEnabled(false);
+      setStatus('Analyzing "' + (name || 'audio') + '"...');
+      AudioEngine.decode(arrayBuffer, function (buffer) {
+        AudioEngine.setSong(buffer);
+        analyze(buffer, function (chart) {
+          var sys = chart.system === 'essentia' ? 'essentia' : 'fallback FFT';
+          console.log('[Analyzer] beatmap generated with ' + sys + ' — ' + chart.notes.length + ' notes' + (chart.bpm ? ', ' + Math.round(chart.bpm) + ' BPM' : ''));
+          var buckets = {}, k;
+          for (k = 0; k < chart.notes.length; k++) {
+            var nn = chart.notes[k];
+            var b = Math.floor(nn.t / 20) * 20;
+            buckets[b] = buckets[b] || { red: 0, blue: 0 };
+            if (nn.color === 'red') buckets[b].red++; else buckets[b].blue++;
+          }
+          var parts = [];
+          if (chart.notes.length) {
+            for (k = 0; k <= Math.floor(chart.notes[chart.notes.length - 1].t / 20) * 20; k += 20) {
+              if (buckets[k]) parts.push(k + 's:R' + buckets[k].red + '/B' + buckets[k].blue);
+            }
+          }
+          console.log('[Analyzer] color mix per 20s: ' + parts.join('  '));
+          Game.loadChart(chart);
+          setStatus('Ready — ' + chart.notes.length + ' notes' + (chart.bpm ? ' @ ' + Math.round(chart.bpm) + ' BPM' : '') + '. Press Start.');
+          setSystem('Analysis engine: ' + sys);
+        });
+      }, function () {
+        setStatus('Could not decode that audio file.');
+        if (window.Game && window.Game.setStartEnabled) window.Game.setStartEnabled(true);
+      });
     }
   };
 
