@@ -121,19 +121,40 @@ window.AudioEngine = (function () {
   }
 
   return {
-    start: function () {
+    start: function (from) {
       ensure();
       if (ctx.state === 'suspended') ctx.resume();
       stopSrc();
       if (songBuffer) {
+        from = from || 0;
+        from = Math.max(0, Math.min(from, songBuffer.duration - 0.01));
         src = ctx.createBufferSource();
         src.buffer = songBuffer;
         src.connect(master);
-        zeroTime = ctx.currentTime + 0.05;
-        src.start(zeroTime);
+        zeroTime = ctx.currentTime + 0.05 - from;
+        src.start(ctx.currentTime + 0.05, from);
       } else {
         schedule();
       }
+    },
+    seek: function (t) {
+      if (!songBuffer) return t;
+      t = Math.max(0, Math.min(t, songBuffer.duration - 0.01));
+      if (src) {
+        stopSrc();
+        src = ctx.createBufferSource();
+        src.buffer = songBuffer;
+        src.connect(master);
+        zeroTime = ctx.currentTime + 0.05 - t;
+        src.start(ctx.currentTime + 0.05, t);
+      } else {
+        zeroTime = ctx.currentTime - t;
+      }
+      return t;
+    },
+    stop: function () {
+      stopSrc();
+      return this.time();
     },
     time: time,
     decode: decode,

@@ -11,6 +11,9 @@ window.Game = {
   spawnIdx: 0,
   notes: [],
   _at: 0,
+  songName: 'beatmap',
+  demos: [],
+  demoIdx: -1,
 
   laneX: [-1.2, -0.4, 0.4, 1.2],
   HEIGHT: 1.8,
@@ -42,6 +45,10 @@ window.Game = {
     this.overlayTitle = this.overlay.querySelector('h1');
     this.overlaySub = document.getElementById('sub');
     this.startBtn = document.getElementById('start');
+    this.demoSel = document.getElementById('demo');
+    this.analyzeBtn = document.getElementById('analyze');
+    this.demoSel.addEventListener('change', function () { Game.loadDemo(); });
+    this.analyzeBtn.addEventListener('click', function () { Game.startAnalysis(); });
 
     document.querySelectorAll('[hand-controls]').forEach(function (h) {
       h.addEventListener('triggerdown', function () { Game.start(); });
@@ -53,18 +60,124 @@ window.Game = {
     } catch (e) {}
 
     var self = this;
-    Analyzer.loadUrl('beatmaps/finefin - LD46 Keep it alive - 05 LD46 Dancing Bear.mp3', 'LD46 Dancing Bear', function () {
-      fetch('beatmaps/demo.json')
-        .then(function (r) { return r.json(); })
-        .then(function (json) { self.loadChart(json); })
-        .catch(function (e) { console.error('beatmap load failed', e); });
+    fetch('beatmaps/manifest.json?t=' + Date.now())
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (manifest) { self.loadManifest(manifest); })
+      .catch(function (e) {
+        console.error('manifest load failed', e);
+        self.loadChartFallback();
+      });
+  },
+
+  loadManifest: function (manifest) {
+    this.demos = manifest.demos || (Array.isArray(manifest) ? manifest : []);
+    this.demoSel.innerHTML = '';
+    var self = this;
+    this.demos.forEach(function (d, i) {
+      var opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = d.name || d.audio;
+      self.demoSel.appendChild(opt);
     });
+    console.log('[Game] demos loaded:', this.demos.map(function (d) {
+      return (d.name || d.audio) + ' -> chart ' + (d.chart || 'NONE');
+    }));
+    if (this.demos.length) {
+      this.demoSel.value = '0';
+      this.loadDemo();
+    } else {
+      this.loadChartFallback();
+    }
+  },
+
+  loadDemo: function () {
+    var i = parseInt(this.demoSel.value, 10);
+    var d = this.demos[i];
+    if (!d || i === this.demoIdx) return;
+    this.demoIdx = i;
+    this.songName = d.name || d.audio.replace(/\.[^.]+$/, '');
+    var url = 'beatmaps/' + d.audio;
+    this.chart = null;
+    this.setStartEnabled(false);
+    this.setAnalyzeEnabled(false);
+    this.setStatus('Loading "' + (d.name || d.audio) + '"...');
+    var self = this;
+    var ts = Date.now();
+    fetch(url + '?t=' + ts)
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function (buf) {
+        if (d.chart) {
+          AudioEngine.decode(buf, function (song) {
+            AudioEngine.setSong(song);
+            fetch('beatmaps/' + d.chart + '?t=' + ts)
+              .then(function (r) { return r.json(); })
+              .then(function (chart) {
+                self.loadChart(chart);
+                self.setStatus('Ready — ' + chart.notes.length + ' notes. Press Start.');
+              })
+              .catch(function (e) {
+                console.error('chart load failed', e);
+                self.setStatus('Beatmap file "beatmaps/' + d.chart + '" not found. Create it: Load MP3, Analyze, then Save beatmap to folder.');
+              });
+          }, function () {
+            self.setStatus('Could not decode audio.');
+          });
+        } else {
+          self.setStatus('No beatmap for "' + (d.name || d.audio) + '" yet. Load it as MP3, press Analyze, then Save beatmap to folder and set "chart" in beatmaps/manifest.json.');
+        }
+      })
+      .catch(function (e) {
+        console.error('demo load failed', e);
+        self.setStatus('Could not load ' + url + '.');
+      });
+  },
+
+  startAnalysis: function () {
+    if (window.Analyzer && window.Analyzer.analyzeLoaded) {
+      this.setAnalyzeEnabled(false);
+      this.setStartEnabled(false);
+      window.Analyzer.analyzeLoaded();
+    }
+  },
+
+  onAudioReady: function () {
+    this.setAnalyzeEnabled(true);
+    this.setStartEnabled(false);
+    this.setStatus('Audio loaded — press Analyze to generate the beatmap.');
+  },
+
+  onAudioError: function () {
+    this.setStartEnabled(false);
+  },
+
+  setAnalyzeEnabled: function (enabled) {
+    if (this.analyzeBtn) this.analyzeBtn.disabled = !enabled;
+  },
+
+  loadChartFallback: function () {
+    var self = this;
+    this.setStatus('No demos found — using built-in demo chart.');
+    fetch('beatmaps/demo.json')
+      .then(function (r) { return r.json(); })
+      .then(function (json) { self.loadChart(json); })
+      .catch(function (e) { console.error('beatmap load failed', e); });
   },
 
   loadChart: function (chart) {
     this.chart = chart;
     this.total = chart.notes.length;
     this.setStartEnabled(true);
+    this.setAnalyzeEnabled(false);
+  },
+
+  setStatus: function (text) {
+    if (window.Analyzer && window.Analyzer.setStatus) window.Analyzer.setStatus(text);
   },
 
   setStartEnabled: function (enabled) {

@@ -13,6 +13,7 @@
   </script>
   <style>
     body { margin: 0; font-family: sans-serif; }
+    .hidden { display: none !important; }
     #overlay {
       position: fixed; inset: 0; z-index: 10;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -25,6 +26,22 @@
     #start:disabled { background: #555; color: #999; cursor: not-allowed; }
     #upload { margin-top: 14px; font-size: 1rem; padding: 8px 22px; cursor: pointer; }
     #status { margin-top: 10px; opacity: 0.7; font-size: 0.9rem; }
+    button:disabled { background: #444; color: #777; cursor: not-allowed; }
+    #editor {
+      position: fixed; inset: 0; z-index: 20;
+      background: #101018; color: #fff;
+      padding: 14px 18px; font-family: sans-serif; overflow: auto;
+    }
+    #editor-bar { display: flex; align-items: center; gap: 14px; }
+    #editor-bar h2 { margin: 0; }
+    #editor-controls { margin: 10px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    #editor-view { display: flex; gap: 12px; align-items: flex-start; }
+    #editor-map, #editor-wave { display: block; background: #15151f; border: 1px solid #333; }
+    #editor-tools { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    #editor-tools button, #editor-tools span { font-size: 0.95rem; }
+    #editor-status { opacity: 0.85; margin: 8px 0; }
+    #editor .active { outline: 2px solid #ffcc33; }
+    #editor button { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -32,11 +49,61 @@
     <h1>Rhythm Slicer</h1>
     <p id="sub">Slice the cubes on the beat with the matching colored saber.<br>Perfect &le; 50ms &middot; Good &le; 100ms &middot; OK &le; 150ms.<br>Wrong saber = -100 points.<br>Hit the white corner first — correct direction doubles the score.</p>
     <p>Enter VR, then press a controller trigger to start.</p>
+    <p>
+      <label for="demo">Demo: </label>
+      <select id="demo"></select>
+    </p>
     <input type="file" id="file" accept="audio/*" hidden>
     <button id="upload">Load MP3</button>
+    <button id="analyze" disabled>Analyze</button>
     <button id="start" disabled>Start</button>
+    <button id="editor-open">Beatmap Editor…</button>
     <p id="status">Loading demo song…</p>
     <p id="system"></p>
+  </div>
+
+  <div id="editor" class="hidden">
+    <div id="editor-bar">
+      <button id="editor-back">Back</button>
+      <h2>Beatmap Editor</h2>
+    </div>
+    <p id="editor-status">Load an MP3 to start editing. Click the map to add/select notes.</p>
+    <div id="editor-controls">
+      <input type="file" id="editor-file" accept="audio/*" hidden>
+      <select id="editor-load"><option value="">Load existing…</option></select>
+      <button id="editor-upload">Load MP3</button>
+      <button id="editor-empty">Create empty beatmap</button>
+      <button id="editor-analyze" disabled>Analyze</button>
+      <button id="editor-play" disabled>Play</button>
+      <button id="editor-download" disabled>Download beatmap</button>
+      <button id="editor-save" disabled>Save to folder…</button>
+    </div>
+    <div id="editor-view">
+      <canvas id="editor-map" width="420" height="640"></canvas>
+      <canvas id="editor-wave" width="160" height="640"></canvas>
+    </div>
+    <div id="editor-tools">
+      <span>Selected: <b id="editor-sel">—</b></span>
+      <button data-move="left" title="move left">◀</button>
+      <button data-move="right" title="move right">▶</button>
+      <button data-move="up" title="move earlier (0.5s)">▲</button>
+      <button data-move="down" title="move later (0.5s)">▼</button>
+      <button data-move="hup" title="height up (0.1)">H+</button>
+      <button data-move="hdown" title="height down (0.1)">H−</button>
+      <button id="editor-delete">Delete</button>
+      <button id="editor-clear">Delete all notes</button>
+      <span>Zoom:</span>
+      <button id="editor-zoom-out">−</button>
+      <b id="editor-zoom">×1</b>
+      <button id="editor-zoom-in">+</button>
+      <span>Add color:</span>
+      <button id="editor-color-red" class="active">Red</button>
+      <button id="editor-color-blue">Blue</button>
+      <span>Time: <b id="editor-time">0.0s</b></span>
+    </div>
+    <p id="editor-help" style="opacity:.6; font-size:.85rem">
+      While playing: 1-4 add a note in that lane (lanes 1-2 red, 3-4 blue), 0 switches add-color, Space play/stop. Also: ←/→ lane · ↑/↓ time · Shift+↑/↓ height · Delete remove · drag the waveform to seek, drag the map notes to move them.
+    </p>
   </div>
 
   <a-scene renderer="antialias:false" fog="type: linear; color: #000; near: 8; far: 160">
@@ -76,6 +143,7 @@
   <script src="components/note.js"></script>
   <script src="components/slicer.js"></script>
   <script src="components/game.js"></script>
+  <script src="components/editor.js"></script>
   <script>
     document.getElementById('start').addEventListener('click', function () {
       window.Game.start();
@@ -86,6 +154,9 @@
     document.getElementById('file').addEventListener('change', function () {
       window.Analyzer.handleFile(this.files[0]);
       this.value = '';
+    });
+    document.getElementById('editor-open').addEventListener('click', function () {
+      window.Editor.open();
     });
   </script>
 </body>
