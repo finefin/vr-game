@@ -1,4 +1,4 @@
-# Rhythm Slicer VR game
+# Rhythm Sword VR game
 
 A WebXR rhythm game. Load an MP3, and a beatmap is generated on the fly: melody, rhythm, and onset detection drive colored notes you slice with left (red) and right (blue) sabers in VR.
 

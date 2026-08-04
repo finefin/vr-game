@@ -273,22 +273,11 @@
     markTriplets(out);
     if (out.length > MAX_NOTES) out = thin(out);
     assignLanes(out);
-    assignDirs(out);
     var chart = [];
     for (i = 0; i < out.length; i++) {
-      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y, dir: out[i].dir });
+      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y });
     }
     return { bpm: bpm, source: 'mp3', system: 'fft', notes: chart };
-  }
-
-  var DIR_LIST = ['l', 'r', 'u', 'd', 'bl', 'br', 'tl', 'tr'];
-
-  function assignDirs(arr) {
-    for (var i = 0; i < arr.length; i++) {
-      if (!arr[i].dir) {
-        arr[i].dir = DIR_LIST[Math.floor(Math.random() * DIR_LIST.length)];
-      }
-    }
   }
 
   function balanceSplit(arr) {
@@ -338,10 +327,9 @@
     if (out.length > MAX_NOTES) out = thin(out);
     balanceSplit(out);
     assignLanesSplit(out);
-    assignDirs(out);
     var chart = [];
     for (i = 0; i < out.length; i++) {
-      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y, dir: out[i].dir });
+      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y });
     }
     return { bpm: bpm, source: 'mp3', system: 'essentia', notes: chart };
   }

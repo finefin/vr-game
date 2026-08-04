@@ -20,16 +20,24 @@ window.Editor = (function () {
   var waveData = null;
   var WAVE_BUCKETS = 4096;
 
-  var DIRS = {
-    l:  { x: -1, y: 0 },
-    r:  { x: 1, y: 0 },
-    u:  { x: 0, y: -1 },
-    d:  { x: 0, y: 1 },
-    bl: { x: -1, y: 1 },
-    br: { x: 1, y: 1 },
-    tl: { x: -1, y: -1 },
-    tr: { x: 1, y: -1 }
-  };
+  function resize() {
+    if (!el.editor || el.editor.classList.contains('hidden')) return;
+    var used = 48;
+    ['editor-bar', 'editor-status', 'editor-controls', 'editor-tools', 'editor-help'].forEach(function (id) {
+      var elm = document.getElementById(id);
+      if (elm) used += elm.offsetHeight;
+    });
+    var h = Math.max(240, Math.min(900, window.innerHeight - used));
+    mapH = h;
+    mapW = Math.round(h * 0.656);
+    wavH = h;
+    wavW = Math.round(h * 0.25);
+    map.width = mapW;
+    map.height = mapH;
+    wav.width = wavW;
+    wav.height = wavH;
+    render();
+  }
 
   var el = {};
 
@@ -59,7 +67,7 @@ window.Editor = (function () {
 
   function noteSize(w) {
     if (playing) return 24;
-    return Math.max(6, Math.min(20, mapH / (w.t1 - w.t0) * 0.4));
+    return Math.max(6, Math.min(26, mapH / (w.t1 - w.t0) * 0.4));
   }
 
   function noteColor(n) { return n.color === 'blue' ? '#33ccff' : '#ff3355'; }
@@ -94,12 +102,12 @@ window.Editor = (function () {
         ctx.lineWidth = 2;
         ctx.strokeRect(x - ns / 2, y - ns / 2, ns, ns);
       }
-      var d = DIRS[n.dir];
-      if (d) {
-        ctx.fillStyle = '#ffffff';
-        ctx.beginPath();
-        ctx.arc(x + d.x * ns / 3, y + d.y * ns / 3, Math.max(2, ns / 6), 0, Math.PI * 2);
-        ctx.fill();
+      if (ns >= 12 || n === selected) {
+        ctx.fillStyle = '#000';
+        ctx.font = Math.max(8, ns * 0.38) + 'px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText((n.y || defaultY).toFixed(1), x, y);
       }
     }
     var py = yOf(curTime, w.t0, w.t1);
@@ -317,8 +325,7 @@ window.Editor = (function () {
       t: Math.round(t * 20) / 20,
       lane: lane,
       color: noteColor || color,
-      y: defaultY,
-      dir: ''
+      y: defaultY
     };
     chart.notes.push(n);
     sortNotes();
@@ -351,8 +358,16 @@ window.Editor = (function () {
     else if (which === 'up') n.t = Math.max(0, n.t - 0.5);
     else if (which === 'down') n.t = n.t + 0.5;
     else if (which === 'hup') n.y = Math.min(4, (n.y || defaultY) + 0.1);
-    else if (which === 'hdown') n.y = Math.max(0.4, (n.y || defaultY) - 0.1);
+    else if (which === 'hdown') n.y = Math.max(1, (n.y || defaultY) - 0.1);
     sortNotes();
+    render();
+  }
+
+  function randomizeY() {
+    if (!chart || !chart.notes.length) return;
+    for (var i = 0; i < chart.notes.length; i++) {
+      chart.notes[i].y = Math.round((1 + Math.random() * 3) * 10) / 10;
+    }
     render();
   }
 
@@ -550,7 +565,7 @@ window.Editor = (function () {
 
   function zoomIn() {
     if (selected) curTime = selected.t;
-    zoom = Math.min(16, zoom * 1.5);
+    zoom = Math.min(32, zoom * 1.5);
     updateZoom();
     render();
   }
@@ -599,6 +614,7 @@ window.Editor = (function () {
       $('editor-zoom-out').addEventListener('click', zoomOut);
       $('editor-delete').addEventListener('click', delSelected);
       $('editor-clear').addEventListener('click', clearAll);
+      $('editor-random-y').addEventListener('click', randomizeY);
       $('editor-color-red').addEventListener('click', function () { setColor('red'); });
       $('editor-color-blue').addEventListener('click', function () { setColor('blue'); });
       Array.prototype.forEach.call(document.querySelectorAll('[data-move]'), function (btn) {
@@ -610,12 +626,14 @@ window.Editor = (function () {
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
       window.addEventListener('keydown', onKeyDown);
+      window.addEventListener('resize', resize);
     },
 
     open: function () {
       $('overlay').classList.add('hidden');
       el.editor.classList.remove('hidden');
       updateZoom();
+      resize();
       if (!rafId) rafId = requestAnimationFrame(loop);
       render();
     },

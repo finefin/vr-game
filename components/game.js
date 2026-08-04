@@ -17,16 +17,6 @@ window.Game = {
 
   laneX: [-1.2, -0.4, 0.4, 1.2],
   HEIGHT: 1.8,
-  DIRS: {
-    l:  { x: -1, y: 0 },
-    r:  { x: 1, y: 0 },
-    u:  { x: 0, y: 1 },
-    d:  { x: 0, y: -1 },
-    bl: { x: -1, y: -1 },
-    br: { x: 1, y: -1 },
-    tl: { x: -1, y: 1 },
-    tr: { x: 1, y: 1 }
-  },
   SPAWN_Z: 18,
   LEAD_TIME: 1.5,
   PASS_Z: 1.2,
@@ -214,17 +204,25 @@ window.Game = {
   spawnNote: function (d) {
     var el = document.createElement('a-box');
     el.setAttribute('geometry', { width: 0.35, height: 0.35, depth: 0.35 });
-    el.setAttribute('note', { lane: d.lane, color: d.color, time: d.t, y: d.y || this.HEIGHT, dir: d.dir || '' });
+    el.setAttribute('note', { lane: d.lane, color: d.color, time: d.t, y: d.y || this.HEIGHT });
     this.notesEl.appendChild(el);
-    var dir = this.DIRS[d.dir] || null;
     this.notes.push({
       el: el,
       state: 'active',
       time: d.t,
-      color: d.color,
-      dirX: dir ? dir.x : 0,
-      dirY: dir ? dir.y : 0
+      color: d.color
     });
+  },
+
+  spawnExplosion: function (n) {
+    if (!window.AFRAME || !AFRAME.components.explosion) return;
+    var hex = n.color === 'blue' ? '#33ccff' : '#ff3355';
+    var w = new THREE.Vector3();
+    n.el.object3D.getWorldPosition(w);
+    var ex = document.createElement('a-entity');
+    ex.setAttribute('explosion', { color: hex });
+    ex.setAttribute('position', w.x + ' ' + w.y + ' ' + w.z);
+    document.querySelector('a-scene').appendChild(ex);
   },
 
   trySlice: function (prev, curr, color) {
@@ -236,12 +234,12 @@ window.Game = {
       var p = n.el.object3D.position;
       if (p.z < -1.2 || p.z > 1.2) continue;
       if (segDist(prev, curr, p) <= this.HIT_RADIUS) {
-        this.slice(n, color, prev, curr);
+        this.slice(n, color);
       }
     }
   },
 
-  slice: function (n, color, prev, curr) {
+  slice: function (n, color) {
     var ms = Math.abs(this._at - n.time) * 1000;
     var pts, grade;
     if (color !== n.color) {
@@ -252,18 +250,10 @@ window.Game = {
     else if (ms <= 100) { pts = 70; grade = 'GOOD'; this.combo++; }
     else { pts = 40; grade = 'OK'; this.combo++; }
 
-    if (pts > 0 && (n.dirX || n.dirY) && prev && curr) {
-      var swing = new THREE.Vector3(curr.x - prev.x, curr.y - prev.y, curr.z - prev.z).normalize();
-      var want = new THREE.Vector3(n.dirX, n.dirY, 0).normalize();
-      if (swing.dot(want) < -0.8) {
-        pts *= 2;
-        grade += ' x2';
-      }
-    }
-
     n.state = 'sliced';
     n.el.remove();
     this.notes.splice(this.notes.indexOf(n), 1);
+    this.spawnExplosion(n);
     this.score += pts;
     if (this.combo > this.maxCombo) this.maxCombo = this.combo;
     this.hits++;

@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Rhythm Slicer</title>
+  <title>Rhythm Sword</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
   <script type="module">
@@ -30,24 +30,27 @@
     #editor {
       position: fixed; inset: 0; z-index: 20;
       background: #101018; color: #fff;
-      padding: 14px 18px; font-family: sans-serif; overflow: auto;
+      font-family: sans-serif; overflow: auto;
+      display: flex;
     }
-    #editor-bar { display: flex; align-items: center; gap: 14px; }
+    #editor-inner { margin: auto; padding: 14px 18px; display: flex; flex-direction: column; align-items: center; }
+    #editor-bar { display: flex; align-items: center; gap: 14px; width: 100%; }
     #editor-bar h2 { margin: 0; }
-    #editor-controls { margin: 10px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    #editor-controls { margin: 10px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; }
     #editor-view { display: flex; gap: 12px; align-items: flex-start; }
     #editor-map, #editor-wave { display: block; background: #15151f; border: 1px solid #333; }
-    #editor-tools { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    #editor-tools { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; }
     #editor-tools button, #editor-tools span { font-size: 0.95rem; }
-    #editor-status { opacity: 0.85; margin: 8px 0; }
+    #editor-status { opacity: 0.85; margin: 8px 0; text-align: center; }
     #editor .active { outline: 2px solid #ffcc33; }
     #editor button { cursor: pointer; }
+    #editor-help { text-align: center; }
   </style>
 </head>
 <body>
   <div id="overlay">
-    <h1>Rhythm Slicer</h1>
-    <p id="sub">Slice the cubes on the beat with the matching colored saber.<br>Perfect &le; 50ms &middot; Good &le; 100ms &middot; OK &le; 150ms.<br>Wrong saber = -100 points.<br>Hit the white corner first — correct direction doubles the score.</p>
+    <h1>Rhythm Sword</h1>
+    <p id="sub">Slice the cubes on the beat with the matching colored saber.<br>Perfect &le; 50ms &middot; Good &le; 100ms &middot; OK &le; 150ms.<br>Wrong saber = -100 points.</p>
     <p>Enter VR, then press a controller trigger to start.</p>
     <p>
       <label for="demo">Demo: </label>
@@ -63,11 +66,12 @@
   </div>
 
   <div id="editor" class="hidden">
-    <div id="editor-bar">
-      <button id="editor-back">Back</button>
-      <h2>Beatmap Editor</h2>
-    </div>
-    <p id="editor-status">Load an MP3 to start editing. Click the map to add/select notes.</p>
+    <div id="editor-inner">
+      <div id="editor-bar">
+        <button id="editor-back">Back</button>
+        <h2>Beatmap Editor</h2>
+      </div>
+      <p id="editor-status">Load an MP3 to start editing. Click the map to add/select notes.</p>
     <div id="editor-controls">
       <input type="file" id="editor-file" accept="audio/*" hidden>
       <select id="editor-load"><option value="">Load existing…</option></select>
@@ -92,6 +96,7 @@
       <button data-move="hdown" title="height down (0.1)">H−</button>
       <button id="editor-delete">Delete</button>
       <button id="editor-clear">Delete all notes</button>
+      <button id="editor-random-y">Random heights</button>
       <span>Zoom:</span>
       <button id="editor-zoom-out">−</button>
       <b id="editor-zoom">×1</b>
@@ -104,6 +109,7 @@
     <p id="editor-help" style="opacity:.6; font-size:.85rem">
       While playing: 1-4 add a note in that lane (lanes 1-2 red, 3-4 blue), 0 switches add-color, Space play/stop. Also: ←/→ lane · ↑/↓ time · Shift+↑/↓ height · Delete remove · drag the waveform to seek, drag the map notes to move them.
     </p>
+    </div>
   </div>
 
   <a-scene renderer="antialias:false" fog="type: linear; color: #000; near: 8; far: 160">
@@ -128,9 +134,11 @@
 
       <a-entity id="hud" position="0 1.45 -2">
         <a-text id="score" value="" align="left" anchor="left" position="-2.1 1.55 0"
-                color="#ffffff" scale="1.2 1.2 1" look-at="#cam"></a-text>
+                font="fonts/Orbitron-Bold.json" shader="msdf" color="#ffffff"
+                scale="0.6 0.6 1" look-at="#cam"></a-text>
         <a-text id="combo" value="" align="right" anchor="right" position="2.1 1.55 0"
-                color="#ffdd55" scale="0.8 0.8 1" look-at="#cam"></a-text>
+                font="fonts/Orbitron-Bold.json" shader="msdf" color="#ffdd55"
+                scale="0.4 0.4 1" look-at="#cam"></a-text>
       </a-entity>
     </a-entity>
 
@@ -141,6 +149,7 @@
   <script src="analyze.js"></script>
   <script src="components/landscape.js"></script>
   <script src="components/note.js"></script>
+  <script src="components/effects.js"></script>
   <script src="components/slicer.js"></script>
   <script src="components/game.js"></script>
   <script src="components/editor.js"></script>
