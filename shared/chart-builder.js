@@ -1,4 +1,15 @@
-(function () {
+// Beatmap analysis and chart shaping. Runs in the browser (as window.ChartBuilder)
+// and in Node (as a CommonJS module) from this one file — no build step.
+//
+// The host is responsible for everything this file deliberately does not touch:
+// decoding audio, resampling to SR, constructing the essentia instance, and
+// reporting progress. Pass an engine in for the essentia path or null for the
+// pure-FFT fallback; pass hooks to receive status/log/warn.
+(function (root, factory) {
+  var api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.ChartBuilder = api;
+})(typeof self !== 'undefined' ? self : this, function () {
   var FFT_SIZE = 1024;
   var HOP_S = 0.05;
   var MIN_GAP = 0.22;
@@ -17,15 +28,27 @@
     { lo: 6000, hi: 14000 }
   ];
 
+  var NOOP = function () {};
+
+  function normHooks(hooks) {
+    hooks = hooks || {};
+    return {
+      status: hooks.status || NOOP,
+      log: hooks.log || NOOP,
+      warn: hooks.warn || NOOP
+    };
+  }
+
   function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
   function r3(v) { return Math.round(v * 1000) / 1000; }
   function r2(v) { return Math.round(v * 100) / 100; }
 
-  function decodeWasmException(err) {
+  // Emscripten throws bare heap pointers; dig the std::string message out of one.
+  function decodeWasmException(err, engine) {
     try {
-      if (typeof err !== 'number' || !isFinite(err) || !essentia || !essentia.module) return null;
-      var heap = essentia.module.HEAPU8;
-      var heap32 = essentia.module.HEAPU32;
+      if (typeof err !== 'number' || !isFinite(err) || !engine || !engine.module) return null;
+      var heap = engine.module.HEAPU8;
+      var heap32 = engine.module.HEAPU32;
       if (!heap || !heap32 || err + 40 >= heap.length) return null;
       var size = heap32[(err + 8) >> 2];
       if (!size || size > 4096) return null;
@@ -41,11 +64,11 @@
     } catch (e) { return null; }
   }
 
-  function errText(err) {
+  function errText(err, engine) {
     try {
       if (err instanceof Error && err.message) return err.message;
       if (err && err.message) return err.message;
-      var wasmMsg = decodeWasmException(err);
+      var wasmMsg = decodeWasmException(err, engine);
       if (wasmMsg) return wasmMsg;
       return String(err);
     } catch (e) { return 'unknown'; }
@@ -125,6 +148,12 @@
     }
     return 1.7;
   }
+
+  // The full span heightFor can produce (kick at the floor, hat at the ceiling).
+  // The editor clamps to these so a hand-placed note can reach anywhere a
+  // generated one can.
+  var Y_MIN = 0.4;
+  var Y_MAX = 2.85;
 
   function baseColor(type) {
     return (type === 'mid' || type === 'lead') ? 'blue' : 'red';
@@ -380,58 +409,58 @@
     cb(assemble(notes, melody, 0));
   }
 
-  var essentia = null;
-
-  function ensureEssentia() {
-    if (essentia) return true;
+  // Build an essentia instance and prove it actually works — broken WASM on weak
+  // devices fails here rather than halfway through an analysis. Returns null if
+  // unusable, and the caller falls back to analyzeFft.
+  function createEngine(Essentia, EssentiaWASM, hooks) {
+    var h = normHooks(hooks);
     try {
-      if (window.Essentia && window.EssentiaWASM) {
-        var inst = new window.Essentia(window.EssentiaWASM);
-        var sane = false;
-        try {
-          var test = inst.arrayToVector(new Float32Array([0.1, 0.2, 0.3]));
-          var back = inst.vectorToArray(test);
-          try { test.delete(); } catch (e) {}
-          sane = back instanceof Float32Array && back.length === 3 && isFinite(back[0]);
-        } catch (e) {
-          console.warn('[Analyzer] essentia sanity check failed: ' + errText(e));
-        }
-        if (sane) {
-          essentia = inst;
-          return true;
-        }
-        try { inst.delete(); } catch (e) {}
-        console.warn('[Analyzer] essentia WASM unusable, using fallback analysis');
+      if (!Essentia || !EssentiaWASM) return null;
+      var inst = new Essentia(EssentiaWASM);
+      var sane = false;
+      try {
+        var test = inst.arrayToVector(new Float32Array([0.1, 0.2, 0.3]));
+        var back = inst.vectorToArray(test);
+        try { test.delete(); } catch (e) {}
+        sane = back instanceof Float32Array && back.length === 3 && isFinite(back[0]);
+      } catch (e) {
+        h.warn('essentia sanity check failed: ' + errText(e, inst));
       }
+      if (sane) return inst;
+      try { inst.delete(); } catch (e) {}
+      h.warn('essentia WASM unusable, using fallback analysis');
     } catch (err) {
-      console.warn('essentia init failed, using fallback analysis', err);
+      h.warn('essentia init failed, using fallback analysis: ' + errText(err));
     }
-    essentia = null;
-    return false;
+    return null;
   }
 
-  function cleanupEssentia(vec) {
+  function disposeEngine(engine) {
+    try {
+      if (engine && typeof engine.delete === 'function') engine.delete();
+    } catch (e) {}
+  }
+
+  function freeVector(vec) {
     try {
       if (vec && typeof vec.delete === 'function') vec.delete();
     } catch (e) {}
-    try { if (essentia) essentia.delete(); } catch (e) {}
-    essentia = null;
   }
 
-  function combineOnsets(vec) {
+  function combineOnsets(engine, vec, h) {
     var sum = null;
     var n = 0;
     var methods = ['infogain', 'hfc', 'flux'];
     for (var m = 0; m < methods.length; m++) {
       try {
-        var o = essentia.OnsetDetectionGlobal(vec, 2048, 512, methods[m], SR);
-        var a = essentia.vectorToArray(o.onsetDetections);
+        var o = engine.OnsetDetectionGlobal(vec, 2048, 512, methods[m], SR);
+        var a = engine.vectorToArray(o.onsetDetections);
         if (!sum) sum = new Float32Array(a.length);
         if (a.length !== sum.length) continue;
         for (var i = 0; i < a.length; i++) sum[i] += a[i];
         n++;
       } catch (err) {
-        console.warn('onset method ' + methods[m] + ' failed: ' + errText(err));
+        h.warn('onset method ' + methods[m] + ' failed: ' + errText(err, engine));
       }
     }
     if (!n || !sum) return null;
@@ -484,65 +513,70 @@
     return beats;
   }
 
-  function essentiaBpm(vec) {
+  function essentiaBpm(engine, vec, h) {
     try {
-      var pb = essentia.PercivalBpmEstimator(vec);
+      var pb = engine.PercivalBpmEstimator(vec);
       if (pb.bpm) {
-        console.log('[Analyzer] BPM via essentia PercivalBpmEstimator: ' + Math.round(pb.bpm));
+        h.log('BPM via essentia PercivalBpmEstimator: ' + Math.round(pb.bpm));
         return pb.bpm;
       }
     } catch (err) {
-      console.warn('[Analyzer] essentia PercivalBpmEstimator threw: ' + errText(err));
+      h.warn('essentia PercivalBpmEstimator threw: ' + errText(err, engine));
     }
     try {
-      var cur = essentia.RhythmExtractor2013(vec, 208, 'multifeature', 40);
+      var cur = engine.RhythmExtractor2013(vec, 208, 'multifeature', 40);
       if (cur.bpm) {
-        console.log('[Analyzer] BPM via essentia RhythmExtractor2013: ' + Math.round(cur.bpm));
+        h.log('BPM via essentia RhythmExtractor2013: ' + Math.round(cur.bpm));
         return cur.bpm;
       }
     } catch (err) {
-      console.warn('[Analyzer] essentia RhythmExtractor2013 threw: ' + errText(err));
+      h.warn('essentia RhythmExtractor2013 threw: ' + errText(err, engine));
     }
     return null;
   }
 
-  function detectBeats(data) {
+  // essentia gives us a BPM but not a beat-synced grid, so the grid itself comes
+  // from local flux tracking seeded with that BPM.
+  function detectBeats(data, engine, h) {
     var env = fluxOnsets(data);
     var vec = null;
     var bpm = null;
     try {
-      vec = essentia.arrayToVector(data);
-      bpm = essentiaBpm(vec);
+      vec = engine.arrayToVector(data);
+      bpm = essentiaBpm(engine, vec, h);
     } catch (err) {
-      console.warn('[Analyzer] essentia vector init threw: ' + errText(err));
+      h.warn('essentia vector init threw: ' + errText(err, engine));
     }
     if (!bpm) {
       bpm = fluxBpm(env.o, env.hopTime);
-      console.log('[Analyzer] BPM via flux autocorrelation: ' + Math.round(bpm));
+      h.log('BPM via flux autocorrelation: ' + Math.round(bpm));
     }
     if (!bpm) return null;
     var beats = fluxBeats(env.o, env.hopTime, bpm);
     if (beats.length < 3) {
-      console.warn('[Analyzer] flux grid too sparse (' + beats.length + ' beats)');
+      h.warn('flux grid too sparse (' + beats.length + ' beats)');
       return null;
     }
-    console.log('[Analyzer] beat grid from flux: ' + Math.round(bpm) + ' bpm, ' + beats.length + ' beats');
+    h.log('beat grid from flux: ' + Math.round(bpm) + ' bpm, ' + beats.length + ' beats');
     return { bpm: bpm, beats: beats, vec: vec, env: env };
   }
 
-  function analyzeEssentia(data, cb) {
+  // `data` must already be mono at SR. The setTimeout yields keep a browser tab
+  // responsive between the expensive stages; in Node they are simply harmless.
+  function analyzeEssentia(data, engine, hooks, cb) {
+    var h = normHooks(hooks);
     var duration = data.length / SR;
     var vec = null;
 
     function fail() {
-      cleanupEssentia(vec);
-      setStatus('Beat grid failed — using basic analysis (fallback FFT)...');
+      freeVector(vec);
+      h.status('Beat grid failed — using basic analysis (fallback FFT)...');
       analyzeFft(data, SR, cb);
     }
 
-    setStatus('Finding the beat (flux + essentia BPM)...');
+    h.status('Finding the beat (flux + essentia BPM)...');
     setTimeout(function () {
-      var res = detectBeats(data);
+      var res = detectBeats(data, engine, h);
       if (!res) {
         fail();
         return;
@@ -554,43 +588,46 @@
       var pitch = null;
       var onsetDet = null;
 
+      function finishBuild(beats2, bpm2, pitch2, onsetDet2) {
+        h.status('Building the beat map...');
+        setTimeout(function () {
+          var chart = null;
+          try {
+            chart = buildChart(data, SR, {
+              bpm: bpm2, beats: beats2, pitch: pitch2, onsetDet: onsetDet2,
+              duration: duration, env: env
+            });
+          } catch (err) {
+            h.warn('beat map build failed: ' + errText(err, engine));
+          }
+          freeVector(vec);
+          if (!chart) { fail(); return; }
+          cb(chart);
+        }, 30);
+      }
+
       if (vec) {
-        setStatus('Tracking the melody (essentia)...');
+        h.status('Tracking the melody (essentia)...');
         setTimeout(function () {
           try {
-            var mel = essentia.PredominantPitchMelodia(vec);
-            pitch = essentia.vectorToArray(mel.pitch);
+            var mel = engine.PredominantPitchMelodia(vec);
+            pitch = engine.vectorToArray(mel.pitch);
           } catch (err) {
-            console.warn('essentia melody analysis failed, continuing without melody: ' + errText(err));
+            h.warn('essentia melody analysis failed, continuing without melody: ' + errText(err, engine));
           }
-          setStatus('Detecting onsets (essentia)...');
+          h.status('Detecting onsets (essentia)...');
           setTimeout(function () {
             try {
-              onsetDet = combineOnsets(vec);
+              onsetDet = combineOnsets(engine, vec, h);
             } catch (err) {
-              console.warn('essentia onset analysis failed, continuing without fills: ' + errText(err));
+              h.warn('essentia onset analysis failed, continuing without fills: ' + errText(err, engine));
             }
             finishBuild(beats, bpm, pitch, onsetDet);
           }, 30);
         }, 30);
       } else {
-        setStatus('Building the beat map...');
+        h.status('Building the beat map...');
         finishBuild(beats, bpm, pitch, onsetDet);
-      }
-
-      function finishBuild(beats2, bpm2, pitch2, onsetDet2) {
-        setStatus('Building the beat map...');
-        setTimeout(function () {
-          var chart = null;
-          try {
-            chart = buildChart(data, SR, { bpm: bpm2, beats: beats2, pitch: pitch2, onsetDet: onsetDet2, duration: duration, env: env });
-          } catch (err) {
-            console.warn('beat map build failed: ' + errText(err));
-          }
-          cleanupEssentia(vec);
-          if (!chart) { fail(); return; }
-          cb(chart);
-        }, 30);
       }
     }, 30);
   }
@@ -649,6 +686,8 @@
       lastT = t;
     }
 
+    // Off-beat onsets become fills, snapped to the grid and rate-limited so a
+    // busy passage cannot bury the player.
     if (es.onsetDet) {
       var onHopTime = 512 / SR;
       var on = es.onsetDet;
@@ -696,6 +735,7 @@
       }
     }
 
+    // Sustained melody notes become blue notes at a height tracking their pitch.
     var melody = [];
     if (es.pitch) {
       var melHop = 128 / SR;
@@ -743,148 +783,37 @@
     return assembleSplit(primary, melody, bpm);
   }
 
-  var statusEl = null;
-  var systemEl = null;
-  var readyBuffer = null;
-
-  function setStatus(text) {
-    if (statusEl) statusEl.textContent = text;
-  }
-
-  function setSystem(text) {
-    if (systemEl) systemEl.textContent = text;
-  }
-
-  function resample44(data, sr, cb) {
-    if (sr === SR || data.length === 0) { cb(data); return; }
-    var ctx;
-    try {
-      ctx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, Math.ceil(data.length * SR / sr), SR);
-    } catch (e) {
-      console.warn('OfflineAudioContext unavailable, using original rate', errText(e));
-      cb(data);
-      return;
+  // Per-20s red/blue counts — the quickest way to spot a chart that has gone
+  // one-handed partway through a song.
+  function colorMix(chart) {
+    var buckets = {}, k;
+    for (k = 0; k < chart.notes.length; k++) {
+      var nn = chart.notes[k];
+      var b = Math.floor(nn.t / 20) * 20;
+      buckets[b] = buckets[b] || { red: 0, blue: 0 };
+      if (nn.color === 'red') buckets[b].red++; else buckets[b].blue++;
     }
-    var buf = ctx.createBuffer(1, data.length, sr);
-    buf.getChannelData(0).set(data);
-    var src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.connect(ctx.destination);
-    src.start();
-    ctx.startRendering().then(function (out) {
-      cb(out.getChannelData(0));
-    }, function (e) {
-      console.warn('resample failed, using original rate', errText(e));
-      cb(data);
-    });
-  }
-
-  function analyze(buffer, cb) {
-    var sr = buffer.sampleRate;
-    var data = mono(buffer);
-    if (!ensureEssentia()) {
-      setStatus('Using basic analysis (essentia unavailable)...');
-      analyzeFft(data, sr, cb);
-      return;
+    var parts = [];
+    if (chart.notes.length) {
+      for (k = 0; k <= Math.floor(chart.notes[chart.notes.length - 1].t / 20) * 20; k += 20) {
+        if (buckets[k]) parts.push(k + 's:R' + buckets[k].red + '/B' + buckets[k].blue);
+      }
     }
-    sanitize(data);
-    setStatus('Preparing audio (resampling to 44.1kHz)...');
-    resample44(data, sr, function (data44) {
-      analyzeEssentia(data44, cb);
-    });
+    return parts.join('  ');
   }
 
-  window.Analyzer = {
-    init: function () {
-      statusEl = document.getElementById('status');
-      systemEl = document.getElementById('system');
-      if (ensureEssentia()) {
-        setSystem('Analysis engine: essentia (WASM) ready');
-        console.log('[Analyzer] essentia.js WASM loaded');
-      } else {
-        setSystem('Analysis engine: fallback FFT (essentia not usable)');
-        console.warn('[Analyzer] essentia.js not usable — analysis will use fallback FFT');
-      }
-    },
-    handleFile: function (file) {
-      if (!file) return;
-      var reader = new FileReader();
-      reader.onload = function (e) {
-        this.loadBuffer(e.target.result, file.name);
-      }.bind(this);
-      reader.readAsArrayBuffer(file);
-    },
-    loadUrl: function (url, name, onError) {
-      fetch(url)
-        .then(function (r) {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          return r.arrayBuffer();
-        })
-        .then(function (buf) {
-          this.loadBuffer(buf, name || url);
-        }.bind(this))
-        .catch(function (err) {
-          console.error('[Analyzer] failed to load ' + url, err);
-          setStatus('Could not load ' + url + '.');
-          if (window.Game && window.Game.setStartEnabled) window.Game.setStartEnabled(true);
-          if (onError) onError(err);
-        });
-    },
-    loadBuffer: function (arrayBuffer, name) {
-      if (window.Game) window.Game.songName = name || (window.Game.songName || 'beatmap');
-      setStatus('Decoding audio...');
-      AudioEngine.decode(arrayBuffer, function (buffer) {
-        AudioEngine.setSong(buffer);
-        readyBuffer = buffer;
-        if (window.Game && window.Game.onAudioReady) window.Game.onAudioReady(buffer);
-      }, function () {
-        setStatus('Could not decode that audio file.');
-        if (window.Game && window.Game.onAudioError) window.Game.onAudioError();
-      });
-    },
-    decodeBuffer: function (arrayBuffer, cb) {
-      setStatus('Decoding audio...');
-      AudioEngine.decode(arrayBuffer, cb, function () {
-        setStatus('Could not decode that audio file.');
-      });
-    },
-    analyzeBuffer: function (buffer, cb) {
-      setStatus('Analyzing audio...');
-      analyze(buffer, cb);
-    },
-    analyzeLoaded: function () {
-      if (!readyBuffer) {
-        setStatus('Load an MP3 first, then press Analyze.');
-        return;
-      }
-      setStatus('Analyzing audio...');
-      analyze(readyBuffer, function (chart) {
-        var sys = chart.system === 'essentia' ? 'essentia' : 'fallback FFT';
-        console.log('[Analyzer] beatmap generated with ' + sys + ' — ' + chart.notes.length + ' notes' + (chart.bpm ? ', ' + Math.round(chart.bpm) + ' BPM' : ''));
-        var buckets = {}, k;
-        for (k = 0; k < chart.notes.length; k++) {
-          var nn = chart.notes[k];
-          var b = Math.floor(nn.t / 20) * 20;
-          buckets[b] = buckets[b] || { red: 0, blue: 0 };
-          if (nn.color === 'red') buckets[b].red++; else buckets[b].blue++;
-        }
-        var parts = [];
-        if (chart.notes.length) {
-          for (k = 0; k <= Math.floor(chart.notes[chart.notes.length - 1].t / 20) * 20; k += 20) {
-            if (buckets[k]) parts.push(k + 's:R' + buckets[k].red + '/B' + buckets[k].blue);
-          }
-        }
-        console.log('[Analyzer] color mix per 20s: ' + parts.join('  '));
-        Game.loadChart(chart);
-        setStatus('Ready — ' + chart.notes.length + ' notes' + (chart.bpm ? ' @ ' + Math.round(chart.bpm) + ' BPM' : '') + '. Press Start.');
-        setSystem('Analysis engine: ' + sys);
-      });
-    },
-    setStatus: setStatus,
-    setSystem: setSystem
+  return {
+    SR: SR,
+    MAX_NOTES: MAX_NOTES,
+    Y_MIN: Y_MIN,
+    Y_MAX: Y_MAX,
+    mono: mono,
+    sanitize: sanitize,
+    errText: errText,
+    createEngine: createEngine,
+    disposeEngine: disposeEngine,
+    analyzeFft: analyzeFft,
+    analyzeEssentia: analyzeEssentia,
+    colorMix: colorMix
   };
-
-  window.addEventListener('load', function () {
-    window.Analyzer.init();
-  });
-})();
+});

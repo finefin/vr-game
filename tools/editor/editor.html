@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Rhythm Sword — Beatmap Editor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    #editor {
+      position: fixed; inset: 0;
+      background: #101018; color: #fff;
+      font-family: sans-serif; overflow: auto;
+      display: flex;
+    }
+    #editor-inner { margin: auto; padding: 14px 18px; display: flex; flex-direction: column; align-items: center; }
+    #editor-bar { display: flex; align-items: center; gap: 14px; width: 100%; }
+    #editor-bar h2 { margin: 0; }
+    #editor-bar a { color: #5aa0ff; font-size: .9rem; }
+    #editor-controls { margin: 10px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; }
+    #editor-grid { margin: 0 0 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; font-size: .95rem; }
+    #editor-grid b { min-width: 3.5em; display: inline-block; text-align: center; }
+    .dirty { color: #ffcc33; }
+    #editor-view { display: flex; gap: 12px; align-items: flex-start; }
+    #editor-map, #editor-wave { display: block; background: #15151f; border: 1px solid #333; }
+    #editor-tools { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; }
+    #editor-tools button, #editor-tools span { font-size: 0.95rem; }
+    #editor-status { opacity: 0.85; margin: 8px 0; text-align: center; }
+    #editor .active { outline: 2px solid #ffcc33; }
+    #editor button { cursor: pointer; }
+    #editor button:disabled { background: #444; color: #777; cursor: not-allowed; }
+    #editor-help { text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="editor">
+    <div id="editor-inner">
+      <div id="editor-bar">
+        <h2>Beatmap Editor</h2>
+        <a href="/">← back to the game</a>
+      </div>
+      <p id="editor-status">Load a song to start editing. Click the map to add/select notes.</p>
+      <div id="editor-controls">
+        <input type="file" id="editor-file" accept="audio/*" hidden>
+        <select id="editor-load"><option value="">Load existing…</option></select>
+        <button id="editor-upload">Add MP3…</button>
+        <button id="editor-empty">Create empty beatmap</button>
+        <button id="editor-analyze" disabled>Analyze</button>
+        <button id="editor-play" disabled>Play</button>
+        <button id="editor-save" disabled>Save to beatmaps/</button>
+        <button id="editor-undo" disabled title="Ctrl+Z">Undo</button>
+        <button id="editor-redo" disabled title="Ctrl+Shift+Z">Redo</button>
+        <b id="editor-dirty" class="dirty"></b>
+      </div>
+      <div id="editor-grid">
+        <span>Grid: <b id="editor-bpm">no BPM</b></span>
+        <span>Snap:</span>
+        <button id="editor-snap-prev">−</button>
+        <b id="editor-snap">1/2</b>
+        <button id="editor-snap-next">+</button>
+        <span>Offset:</span>
+        <button id="editor-offset-minus" title="shift grid 5ms earlier">−</button>
+        <b id="editor-offset">+0.000s</b>
+        <button id="editor-offset-plus" title="shift grid 5ms later">+</button>
+        <button id="editor-fit" title="find the offset that puts the most notes on the grid">Fit grid</button>
+        <button id="editor-quantize">Snap all notes to grid</button>
+      </div>
+      <div id="editor-view">
+        <canvas id="editor-map" width="420" height="640"></canvas>
+        <canvas id="editor-wave" width="160" height="640"></canvas>
+      </div>
+      <div id="editor-tools">
+        <span>Selected: <b id="editor-sel">—</b></span>
+        <button data-move="left" title="move left">◀</button>
+        <button data-move="right" title="move right">▶</button>
+        <button data-move="up" title="move earlier (0.5s)">▲</button>
+        <button data-move="down" title="move later (0.5s)">▼</button>
+        <button data-move="hup" title="height up (0.1)">H+</button>
+        <button data-move="hdown" title="height down (0.1)">H−</button>
+        <button id="editor-delete">Delete</button>
+        <button id="editor-clear">Delete all notes</button>
+        <button id="editor-random-y">Random heights</button>
+        <span>Zoom:</span>
+        <button id="editor-zoom-out">−</button>
+        <b id="editor-zoom">×1</b>
+        <button id="editor-zoom-in">+</button>
+        <span>Add color:</span>
+        <button id="editor-color-red" class="active">Red</button>
+        <button id="editor-color-blue">Blue</button>
+        <span>Time: <b id="editor-time">0.0s</b></span>
+      </div>
+      <p id="editor-help" style="opacity:.6; font-size:.85rem">
+        While playing: 1-4 add a note in that lane (lanes 1-2 red, 3-4 blue), 0 switches add-color, Space play/stop.<br>
+        ←/→ lane · ↑/↓ time (one grid step) · Shift+↑/↓ height · C flip color · Delete remove · Ctrl+Z undo · Ctrl+S save<br>
+        Scroll to zoom around the cursor · drag the waveform to seek · drag notes to move them.
+      </p>
+    </div>
+  </div>
+
+  <script src="/audio.js"></script>
+  <script src="/shared/chart-builder.js"></script>
+  <script src="api.js"></script>
+  <script src="editor.js"></script>
+</body>
+</html>

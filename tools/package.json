@@ -1,0 +1,15 @@
+{
+  "name": "rhythm-sword-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Beatmap generator, editor server and build for Rhythm Sword",
+  "scripts": {
+    "beatmap": "node cli.js",
+    "dev": "node server.js",
+    "build": "node ../build.js"
+  },
+  "dependencies": {
+    "essentia.js": "0.1.3",
+    "node-web-audio-api": "^2.1.0"
+  }
+}

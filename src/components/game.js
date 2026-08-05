@@ -113,13 +113,13 @@ window.Game = {
               })
               .catch(function (e) {
                 console.error('chart load failed', e);
-                self.setStatus('Beatmap file "beatmaps/' + d.chart + '" not found. Create it: Load MP3, Analyze, then Save beatmap to folder.');
+                self.setStatus('Beatmap file "beatmaps/' + d.chart + '" not found. Create it with "npm run beatmap" or the editor in the tools folder.');
               });
           }, function () {
             self.setStatus('Could not decode audio.');
           });
         } else {
-          self.setStatus('No beatmap for "' + (d.name || d.audio) + '" yet. Load it as MP3, press Analyze, then Save beatmap to folder and set "chart" in beatmaps/manifest.json.');
+          self.setStatus('No beatmap for "' + (d.name || d.audio) + '" yet. Generate one with "npm run beatmap" or the editor in the tools folder.');
         }
       })
       .catch(function (e) {
@@ -151,12 +151,9 @@ window.Game = {
   },
 
   loadChartFallback: function () {
-    var self = this;
-    this.setStatus('No demos found — using built-in demo chart.');
-    fetch('beatmaps/demo.json')
-      .then(function (r) { return r.json(); })
-      .then(function (json) { self.loadChart(json); })
-      .catch(function (e) { console.error('beatmap load failed', e); });
+    this.setStatus('No songs found in beatmaps/. Generate one with "npm run beatmap" in the tools folder, then reload.');
+    this.setStartEnabled(false);
+    this.setAnalyzeEnabled(false);
   },
 
   loadChart: function (chart) {
