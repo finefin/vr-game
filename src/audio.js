@@ -4,6 +4,7 @@ window.AudioEngine = (function () {
   var noiseBuf = null;
   var zeroTime = 0;
   var songBuffer = null;
+  var songVersion = 0;
   var src = null;
 
   var BPM = 112;
@@ -41,6 +42,36 @@ window.AudioEngine = (function () {
 
   function setSong(buffer) {
     songBuffer = buffer;
+    songVersion++;
+  }
+
+  // RMS energy per bucket across the whole song, for anything that wants to
+  // draw the song's shape (e.g. the mountain skyline). RMS rather than peak
+  // amplitude — most mastered tracks sit near peak almost everywhere thanks
+  // to loudness limiting, which makes peak a poor proxy for "this section is
+  // quiet vs. loud"; RMS tracks perceived loudness instead. Downmixes to
+  // mono. Returns null until a song is loaded.
+  function waveform(buckets) {
+    if (!songBuffer) return null;
+    var ch0 = songBuffer.getChannelData(0);
+    var ch1 = songBuffer.numberOfChannels > 1 ? songBuffer.getChannelData(1) : null;
+    var len = ch0.length;
+    var out = new Float32Array(buckets);
+    var size = len / buckets;
+    for (var b = 0; b < buckets; b++) {
+      var start = Math.floor(b * size);
+      var end = Math.min(len, Math.floor((b + 1) * size));
+      var sum = 0;
+      var n = 0;
+      for (var i = start; i < end; i++) {
+        var v = ch0[i];
+        if (ch1) v = (v + ch1[i]) * 0.5;
+        sum += v * v;
+        n++;
+      }
+      out[b] = n ? Math.sqrt(sum / n) : 0;
+    }
+    return out;
   }
 
   function tone(type, freq, t, dur, vol) {
@@ -159,6 +190,8 @@ window.AudioEngine = (function () {
     time: time,
     decode: decode,
     setSong: setSong,
+    waveform: waveform,
+    songVersion: function () { return songVersion; },
     endTime: function () {
       return songBuffer ? songBuffer.duration : BARS * BAR_DUR + 2 * BEAT;
     }

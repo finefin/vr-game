@@ -27,7 +27,8 @@
   <div id="overlay">
     <h1>Rhythm Sword</h1>
     <p id="sub">Slice the cubes on the beat with the matching colored saber.<br>Perfect &le; 50ms &middot; Good &le; 100ms &middot; OK &le; 150ms.<br>Wrong saber = -100 points.</p>
-    <p>Enter VR, then press a controller trigger to start.</p>
+    <p>Enter VR, then press a controller trigger to start.<br>
+      <span style="opacity:.7">Testing on desktop: left click = red, right click = blue.</span></p>
     <p>
       <label for="demo">Demo: </label>
       <select id="demo"></select>
@@ -40,8 +41,8 @@
     <p id="system"></p>
   </div>
 
-  <a-scene renderer="antialias:false" fog="type: linear; color: #000; near: 8; far: 160">
-    <a-sky color="#0a0a12"></a-sky>
+  <a-scene renderer="antialias:false" fog="type: linear; color: #000; near: 8; far: 160" mouse-slicer>
+    <a-sky color="#0b0620"></a-sky>
 
     <a-entity id="landscape" landscape="speed: 14"></a-entity>
 
@@ -80,6 +81,7 @@
   <script src="components/note.js"></script>
   <script src="components/effects.js"></script>
   <script src="components/slicer.js"></script>
+  <script src="components/mouse-slicer.js"></script>
   <script src="components/game.js"></script>
   <script>
     document.getElementById('start').addEventListener('click', function () {
