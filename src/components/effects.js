@@ -65,3 +65,28 @@ AFRAME.registerComponent('explosion', {
     }
   }
 });
+
+// Reusable scale-punch for HUD text. Call .punch(strength) to kick it off —
+// positive grows and settles back (a hit), negative dips and recovers (a
+// break). Reads its resting scale from whatever the entity's `scale`
+// attribute already is, so score/combo can share it despite different sizes.
+AFRAME.registerComponent('hud-punch', {
+  init: function () {
+    this.age = Infinity;
+    this.strength = 0;
+    this.base = this.el.object3D.scale.x || 1;
+  },
+
+  punch: function (strength) {
+    this.age = 0;
+    this.strength = strength;
+  },
+
+  tick: function (time, timeDelta) {
+    if (this.age > 0.3) return;
+    this.age += (timeDelta || 16) / 1000;
+    var f = Math.max(0, 1 - this.age / 0.3);
+    var s = this.base * (1 + this.strength * f * f);
+    this.el.object3D.scale.set(s, s, 1);
+  }
+});

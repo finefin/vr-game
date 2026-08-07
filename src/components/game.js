@@ -260,7 +260,8 @@ window.Game = {
       this.notes[idx].state = 'missed';
       this.notes.splice(idx, 1);
     }
-    if (el.parentNode) el.remove();
+    // The note animates its own fall-and-fade (see note.js) and removes
+    // itself when done — no need to remove it here.
     this.combo = 0;
     this.updateHud('MISS');
   },
@@ -281,6 +282,19 @@ window.Game = {
   updateHud: function (grade) {
     this.scoreEl.setAttribute('text', 'value', 'SCORE ' + this.score);
     this.comboEl.setAttribute('text', 'value', grade ? grade + '  COMBO ' + this.combo : '');
+    if (!grade) return;
+
+    var scorePunch = this.scoreEl.components['hud-punch'];
+    var comboPunch = this.comboEl.components['hud-punch'];
+    var broke = grade === 'MISS' || grade === 'WRONG';
+
+    // Score only actually changes on a slice (hit or wrong-saber), not a miss.
+    if (grade !== 'MISS' && scorePunch) scorePunch.punch(grade === 'WRONG' ? 0.22 : 0.32);
+
+    if (comboPunch) {
+      // A break dips instead of growing — reads as "that broke," not "nice."
+      comboPunch.punch(broke ? -0.18 : Math.min(0.55, 0.22 + this.combo * 0.012));
+    }
   }
 };
 

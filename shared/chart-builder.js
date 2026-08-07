@@ -20,6 +20,15 @@
   var CROSSOVER = 0.15;
   var SR = 44100;
 
+  // Section-focus tuning. See computeSections/classifySections below.
+  var SECTION_WINDOW_S = 3.0;        // seconds averaged on each side of a novelty sample
+  var SECTION_MIN_GAP_S = 7;         // minimum section length
+  var SECTION_PERCENTILE = 0.96;     // a boundary is a novelty peak in the top ~4% for this song
+  var FOCUS_MELODY_PERC_MIN = 0.5;   // melody focus: drop percussion hits below this local strength
+  var FOCUS_SPARSE_MIN = 0.65;       // sparse focus: keep only real accents above this local strength
+  var FOCUS_MELODY_MIN_RUN = 0.15;   // melody focus: shorter melody runs qualify
+  var FOCUS_DEFAULT_MIN_RUN = 0.25;  // the pre-existing default elsewhere
+
   var BANDS = [
     { lo: 30, hi: 120 },
     { lo: 120, hi: 300 },
@@ -602,6 +611,11 @@
           }
           freeVector(vec);
           if (!chart) { fail(); return; }
+          if (chart.sections) {
+            h.log('sections: ' + chart.sections.map(function (s) {
+              return s.start.toFixed(1) + '-' + s.end.toFixed(1) + ' ' + s.focus;
+            }).join(' | '));
+          }
           cb(chart);
         }, 30);
       }
@@ -632,6 +646,209 @@
     }, 30);
   }
 
+  // One feature vector per frame: energy, spectral centroid, the 5 band
+  // ratios, and local onset density. Everything here is already computed by
+  // the caller (bandFrames/OnsetDetectionGlobal) — this is just a repackage.
+  function computeFeatureFrames(frames, onsetDet, onsetHopTime, hopTime) {
+    var out = new Array(frames.length);
+    var i, fr, tot, oi, vec;
+    for (i = 0; i < frames.length; i++) {
+      fr = frames[i];
+      tot = fr.tot + 1e-9;
+      // bandFrames only sets .u for frames 1..length-2 (it needs neighbors
+      // for the onset-sharpness calc); default the first/last frame to 0
+      // rather than leaving it undefined — a NaN here would poison every
+      // later prefix-sum entry for this dimension, since they're cumulative.
+      vec = [fr.e, fr.u || 0, fr.bands[0] / tot, fr.bands[1] / tot, fr.bands[2] / tot, fr.bands[3] / tot, fr.bands[4] / tot];
+      if (onsetDet) {
+        oi = Math.round((i * hopTime) / onsetHopTime);
+        vec.push(oi >= 0 && oi < onsetDet.length ? onsetDet[oi] : 0);
+      } else {
+        vec.push(0);
+      }
+      out[i] = vec;
+    }
+    return out;
+  }
+
+  // Novelty curve (Foote-style): at each frame, compare the average feature
+  // vector just before it to the average just after. A big jump means the
+  // song's character changed there — a pause, a riser building, a crash, a
+  // fill, a new instrument entering are all just cases of "this changed a
+  // lot." One generic mechanism instead of five bespoke detectors. Each
+  // feature dimension is min-max normalized across the whole song first, and
+  // windowed averages use prefix sums so the whole sweep is O(n), not O(n*W).
+  function computeNovelty(featVecs, hopTime, windowSec) {
+    var n = featVecs.length;
+    var dims = n ? featVecs[0].length : 0;
+    if (!n || !dims) return new Float32Array(0);
+
+    var mins = new Float32Array(dims);
+    var maxs = new Float32Array(dims);
+    var i, d, v;
+    for (d = 0; d < dims; d++) { mins[d] = Infinity; maxs[d] = -Infinity; }
+    for (i = 0; i < n; i++) {
+      for (d = 0; d < dims; d++) {
+        v = featVecs[i][d];
+        if (v < mins[d]) mins[d] = v;
+        if (v > maxs[d]) maxs[d] = v;
+      }
+    }
+    var ranges = new Float32Array(dims);
+    for (d = 0; d < dims; d++) ranges[d] = (maxs[d] - mins[d]) || 1;
+
+    var prefix = new Float32Array((n + 1) * dims);
+    for (i = 0; i < n; i++) {
+      for (d = 0; d < dims; d++) {
+        prefix[(i + 1) * dims + d] = prefix[i * dims + d] + (featVecs[i][d] - mins[d]) / ranges[d];
+      }
+    }
+
+    function avg(from, to) {
+      from = Math.max(0, from);
+      to = Math.min(n, to);
+      if (to <= from) return null;
+      var out = new Float32Array(dims);
+      for (var dd = 0; dd < dims; dd++) out[dd] = (prefix[to * dims + dd] - prefix[from * dims + dd]) / (to - from);
+      return out;
+    }
+
+    var win = Math.max(1, Math.round(windowSec / hopTime));
+    var novelty = new Float32Array(n);
+    var before, after, sum, diff;
+    for (i = 0; i < n; i++) {
+      before = avg(i - win, i);
+      after = avg(i, i + win);
+      if (!before || !after) continue;
+      sum = 0;
+      for (d = 0; d < dims; d++) { diff = after[d] - before[d]; sum += diff * diff; }
+      novelty[i] = Math.sqrt(sum);
+    }
+    return novelty;
+  }
+
+  // Local maxima of the novelty curve above an adaptive (per-song) threshold,
+  // at least SECTION_MIN_GAP_S apart. Relative to this song's own novelty
+  // range rather than a fixed number, same principle as the per-song
+  // waveform normalization used for the canyon walls.
+  //
+  // Candidates are picked strongest-first (non-max suppression), not by a
+  // left-to-right scan: a left-to-right scan just takes whichever candidate
+  // happens to come first in each minGapSec window, which — whenever the
+  // threshold lets more than a handful of frames through — degenerates into
+  // "a boundary every minGapSec like clockwork" rather than picking out the
+  // moments that actually stand out.
+  function pickBoundaries(novelty, hopTime, minGapSec, percentile) {
+    var n = novelty.length;
+    if (n < 3) return [];
+    var sorted = Array.prototype.slice.call(novelty).sort(function (a, b) { return a - b; });
+    var thresh = sorted[Math.min(n - 1, Math.floor(n * percentile))];
+
+    // A genuine structural peak stands out over roughly a bar's timescale —
+    // testing only immediate ±1-frame neighbors (11ms apart) means any tiny
+    // ripple riding on a sustained loud/dense stretch separately qualifies as
+    // its own "local max," and a whole elevated plateau ends up producing
+    // peaks packed wall-to-wall (so minGapSec becomes the only real limiter).
+    var localWin = Math.max(1, Math.round(1.5 / hopTime));
+    var candidates = [];
+    var i, lo, hi, k, isMax;
+    for (i = 0; i < n; i++) {
+      if (novelty[i] < thresh) continue;
+      lo = Math.max(0, i - localWin);
+      hi = Math.min(n - 1, i + localWin);
+      isMax = true;
+      for (k = lo; k <= hi; k++) {
+        if (k !== i && novelty[k] > novelty[i]) { isMax = false; break; }
+      }
+      if (isMax) candidates.push(i);
+    }
+    candidates.sort(function (a, b) { return novelty[b] - novelty[a]; });
+
+    var minGapFrames = Math.round(minGapSec / hopTime);
+    var accepted = [];
+    for (var c = 0; c < candidates.length; c++) {
+      var idx = candidates[c];
+      var tooClose = false;
+      for (var k = 0; k < accepted.length; k++) {
+        if (Math.abs(idx - accepted[k]) < minGapFrames) { tooClose = true; break; }
+      }
+      if (!tooClose) accepted.push(idx);
+    }
+    accepted.sort(function (a, b) { return a - b; });
+    return accepted.map(function (i2) { return i2 * hopTime; });
+  }
+
+  function buildSectionRanges(boundaryTimes, duration) {
+    var starts = [0].concat(boundaryTimes);
+    var sections = [];
+    for (var i = 0; i < starts.length; i++) {
+      var start = starts[i];
+      var end = (i + 1 < starts.length) ? starts[i + 1] : duration;
+      if (end - start < 0.5) continue;
+      sections.push({ start: start, end: end });
+    }
+    if (!sections.length) sections.push({ start: 0, end: duration });
+    return sections;
+  }
+
+  // Per section: how loud (energy), how melodic (fraction of frames with a
+  // confident pitch), how busy (onset rate) — each normalized against this
+  // song's own range across its sections. A simple decision picks the focus.
+  function classifySections(sections, frames, hopTime, onsetDet, onsetHopTime, pitch, melHop) {
+    var i, s, f0, f1, k, eSum, cnt, p0, p1, m, pCov, pCnt, o0, o1, o, oSum, oCnt;
+    for (i = 0; i < sections.length; i++) {
+      s = sections[i];
+      f0 = Math.max(0, Math.round(s.start / hopTime));
+      f1 = Math.min(frames.length, Math.round(s.end / hopTime));
+      eSum = 0; cnt = 0;
+      for (k = f0; k < f1; k++) { eSum += frames[k].e; cnt++; }
+      s.energyAvg = cnt ? eSum / cnt : 0;
+
+      pCov = 0; pCnt = 0;
+      if (pitch) {
+        p0 = Math.max(0, Math.floor(s.start / melHop));
+        p1 = Math.min(pitch.length, Math.floor(s.end / melHop));
+        for (m = p0; m < p1; m++) { if (pitch[m] > 0) pCov++; pCnt++; }
+      }
+      s.pitchCoverage = pCnt ? pCov / pCnt : 0;
+
+      oSum = 0; oCnt = 0;
+      if (onsetDet) {
+        o0 = Math.max(0, Math.round(s.start / onsetHopTime));
+        o1 = Math.min(onsetDet.length, Math.round(s.end / onsetHopTime));
+        for (o = o0; o < o1; o++) { oSum += onsetDet[o]; oCnt++; }
+      }
+      s.percRaw = oCnt ? oSum / oCnt : 0;
+    }
+
+    var eMax = 0, pMax = 0;
+    for (i = 0; i < sections.length; i++) {
+      if (sections[i].energyAvg > eMax) eMax = sections[i].energyAvg;
+      if (sections[i].percRaw > pMax) pMax = sections[i].percRaw;
+    }
+    eMax = eMax || 1; pMax = pMax || 1;
+
+    for (i = 0; i < sections.length; i++) {
+      s = sections[i];
+      var energyNorm = s.energyAvg / eMax;
+      var percNorm = s.percRaw / pMax;
+      var pitchCov = s.pitchCoverage;
+
+      if (energyNorm < 0.22) s.focus = 'sparse';
+      else if (pitchCov > 0.5 && pitchCov > percNorm * 1.3) s.focus = 'melody';
+      else if (percNorm > 0.45 && percNorm > pitchCov * 1.3) s.focus = 'percussion';
+      else s.focus = 'mixed';
+    }
+    return sections;
+  }
+
+  function focusAt(sections, t) {
+    for (var i = 0; i < sections.length; i++) {
+      if (t >= sections[i].start && t < sections[i].end) return sections[i].focus;
+    }
+    return 'mixed';
+  }
+
   function buildChart(data, sr, es) {
     var hop = 512;
     var B = es.env || bandFrames(data, sr, hop);
@@ -646,6 +863,20 @@
     var i;
 
     if (!frames.length) return assembleSplit([], [], bpm);
+
+    var onHopTime = 512 / SR;
+    var melHop = 128 / SR;
+
+    var sections = classifySections(
+      buildSectionRanges(
+        pickBoundaries(
+          computeNovelty(computeFeatureFrames(frames, es.onsetDet, onHopTime, hopTime), hopTime, SECTION_WINDOW_S),
+          hopTime, SECTION_MIN_GAP_S, SECTION_PERCENTILE
+        ),
+        dur
+      ),
+      frames, hopTime, es.onsetDet, onHopTime, es.pitch, melHop
+    );
 
     function frameAt(t) {
       var idx = Math.round(t / hopTime);
@@ -670,7 +901,7 @@
       var lm = localMax(t);
       if (fr.e < THRESH * lm) return null;
       if (fr.e < 0.02 * maxE) return null;
-      return { t: r3(t), type: fr.type, u: fr.u, y: fr.y, color: fr.color };
+      return { t: r3(t), type: fr.type, u: fr.u, y: fr.y, color: fr.color, strength: lm > 0 ? fr.e / lm : 0 };
     }
 
     var primary = [];
@@ -682,6 +913,11 @@
       var ev = classifyEvent(t);
       if (!ev) continue;
       if (t - lastT < MIN_GAP) continue;
+
+      var focus = focusAt(sections, t);
+      if (focus === 'melody' && ev.strength < FOCUS_MELODY_PERC_MIN) continue;
+      if (focus === 'sparse' && ev.strength < FOCUS_SPARSE_MIN) continue;
+
       primary.push(ev);
       lastT = t;
     }
@@ -689,7 +925,6 @@
     // Off-beat onsets become fills, snapped to the grid and rate-limited so a
     // busy passage cannot bury the player.
     if (es.onsetDet) {
-      var onHopTime = 512 / SR;
       var on = es.onsetDet;
       var cnt = on.length;
       var maxO = 0;
@@ -718,6 +953,9 @@
         if (ts < 0.5 || ts > dur - 0.5) continue;
         var ev2 = classifyEvent(t0);
         if (!ev2) continue;
+        // Fills are a percussion phenomenon — leave melody/sparse sections clear.
+        var fillFocus = focusAt(sections, ts);
+        if (fillFocus === 'melody' || fillFocus === 'sparse') continue;
         cands.push({ t: r3(ts), y: ev2.y, color: ev2.color, strength: on[i] });
       }
       cands.sort(function (a, b) { return a.t - b.t; });
@@ -738,7 +976,6 @@
     // Sustained melody notes become blue notes at a height tracking their pitch.
     var melody = [];
     if (es.pitch) {
-      var melHop = 128 / SR;
       var p = es.pitch;
       var runSem = -999;
       var runStart = -1;
@@ -749,7 +986,9 @@
         var startT = runStart * melHop;
         var endT = endIdx * melHop;
         var dlen = endT - startT;
-        if (dlen >= 0.25) {
+        var focus = focusAt(sections, startT);
+        var minRun = focus === 'melody' ? FOCUS_MELODY_MIN_RUN : FOCUS_DEFAULT_MIN_RUN;
+        if (dlen >= minRun) {
           var midF = 55 * Math.pow(2, runSem / 12);
           var u2 = clamp((Math.log(midF) - Math.log(80)) / (Math.log(2500) - Math.log(80)), 0, 1);
           var y2 = r2(1.75 + 0.95 * u2);
@@ -762,7 +1001,9 @@
           }
 
           addMel(startT);
-          if (dlen >= 0.8) {
+          // Percussion focus thins melody to just each run's onset, not the
+          // in-run densification below, so percussion carries the section.
+          if (dlen >= 0.8 && focus !== 'percussion') {
             var snap = grid;
             for (var tm2 = startT + snap; tm2 < endT - 0.2; tm2 += snap) addMel(tm2);
           }
@@ -780,7 +1021,9 @@
       flushMel(p.length);
     }
 
-    return assembleSplit(primary, melody, bpm);
+    var chart = assembleSplit(primary, melody, bpm);
+    chart.sections = sections.map(function (s) { return { start: r2(s.start), end: r2(s.end), focus: s.focus }; });
+    return chart;
   }
 
   // Per-20s red/blue counts — the quickest way to spot a chart that has gone
