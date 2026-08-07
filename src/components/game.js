@@ -31,19 +31,6 @@ window.Game = {
     this.scoreEl = document.querySelector('#score');
     this.comboEl = document.querySelector('#combo');
     this.notesEl = document.querySelector('#notes');
-    this.overlay = document.getElementById('overlay');
-    this.overlayTitle = this.overlay.querySelector('h1');
-    this.overlaySub = document.getElementById('sub');
-    this.startBtn = document.getElementById('start');
-    this.demoSel = document.getElementById('demo');
-    this.analyzeBtn = document.getElementById('analyze');
-    this.demoSel.addEventListener('change', function () { Game.loadDemo(); });
-    this.analyzeBtn.addEventListener('click', function () { Game.startAnalysis(); });
-
-    document.querySelectorAll('[hand-controls]').forEach(function (h) {
-      h.addEventListener('triggerdown', function () { Game.start(); });
-      h.addEventListener('gripdown', function () { Game.start(); });
-    });
 
     try {
       scene.renderer.xr.setFoveation && scene.renderer.xr.setFoveation(1);
@@ -64,31 +51,28 @@ window.Game = {
 
   loadManifest: function (manifest) {
     this.demos = manifest.demos || (Array.isArray(manifest) ? manifest : []);
-    this.demoSel.innerHTML = '';
-    var self = this;
-    this.demos.forEach(function (d, i) {
-      var opt = document.createElement('option');
-      opt.value = String(i);
-      opt.textContent = d.name || d.audio;
-      self.demoSel.appendChild(opt);
-    });
     console.log('[Game] demos loaded:', this.demos.map(function (d) {
       return (d.name || d.audio) + ' -> chart ' + (d.chart || 'NONE');
     }));
     if (this.demos.length) {
-      this.demoSel.value = '0';
-      this.loadDemo();
+      this.loadDemo(0);
     } else {
       this.loadChartFallback();
     }
   },
 
-  loadDemo: function () {
-    var i = parseInt(this.demoSel.value, 10);
+  selectSong: function (dir) {
+    if (!this.demos.length) return;
+    var i = (this.demoIdx + dir + this.demos.length) % this.demos.length;
+    this.loadDemo(i);
+  },
+
+  loadDemo: function (i) {
     var d = this.demos[i];
     if (!d || i === this.demoIdx) return;
     this.demoIdx = i;
     this.songName = d.name || d.audio.replace(/\.[^.]+$/, '');
+    window.UI.setSongName(this.songName);
     var url = 'beatmaps/' + d.audio;
     this.chart = null;
     this.setStartEnabled(false);
@@ -147,7 +131,7 @@ window.Game = {
   },
 
   setAnalyzeEnabled: function (enabled) {
-    if (this.analyzeBtn) this.analyzeBtn.disabled = !enabled;
+    if (window.UI) window.UI.enableAnalyze(enabled);
   },
 
   loadChartFallback: function () {
@@ -164,11 +148,21 @@ window.Game = {
   },
 
   setStatus: function (text) {
-    if (window.Analyzer && window.Analyzer.setStatus) window.Analyzer.setStatus(text);
+    if (window.UI && window.UI.setStatus) window.UI.setStatus(text);
   },
 
   setStartEnabled: function (enabled) {
-    if (this.startBtn) this.startBtn.disabled = !enabled;
+    if (window.UI) window.UI.enableStart(enabled);
+  },
+
+  begin: function () {
+    if (this.active || this._counting) return;
+    if (!this.chart) return;
+    this._counting = true;
+    window.UI.startCountdown(function () {
+      Game._counting = false;
+      Game.start();
+    });
   },
 
   start: function () {
@@ -183,7 +177,7 @@ window.Game = {
     this.spawnIdx = 0;
     this.notes.length = 0;
     this.notesEl.innerHTML = '';
-    this.overlay.classList.add('hidden');
+    window.UI.onGameStart();
     AudioEngine.start();
     this.updateHud();
   },
@@ -275,13 +269,13 @@ window.Game = {
     this.active = false;
     this.ended = true;
     this.updateHud();
-    this.overlayTitle.textContent = 'Done!';
-    this.overlaySub.textContent =
-      'Score ' + this.score +
-      '  ·  Max Combo ' + this.maxCombo +
-      '  ·  ' + this.hits + '/' + this.total + ' hits';
-    this.startBtn.textContent = 'Play again';
-    this.overlay.classList.remove('hidden');
+    window.UI.onGameEnd({
+      song: this.songName,
+      score: this.score,
+      maxCombo: this.maxCombo,
+      hits: this.hits,
+      total: this.total
+    });
   },
 
   updateHud: function (grade) {

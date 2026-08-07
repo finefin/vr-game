@@ -134,6 +134,12 @@ window.AudioEngine = (function () {
     tone('square', 880, t, 0.05, 0.2);
   }
 
+  function blip(freq) {
+    ensure();
+    if (ctx.state === 'suspended') ctx.resume();
+    tone('square', freq, ctx.currentTime + 0.02, 0.12, 0.22);
+  }
+
   function schedule() {
     var t0 = ctx.currentTime + 0.06;
     click(t0 - 2 * BEAT);
@@ -190,6 +196,7 @@ window.AudioEngine = (function () {
     time: time,
     decode: decode,
     setSong: setSong,
+    blip: blip,
     waveform: waveform,
     songVersion: function () { return songVersion; },
     endTime: function () {

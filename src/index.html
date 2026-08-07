@@ -6,40 +6,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
   <style>
-    body { margin: 0; font-family: sans-serif; }
-    .hidden { display: none !important; }
-    #overlay {
-      position: fixed; inset: 0; z-index: 10;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      background: rgba(0, 0, 0, 0.88); color: #fff; text-align: center;
-    }
-    #overlay.hidden { display: none; }
-    #overlay h1 { margin: 0 0 8px; font-size: 2rem; }
-    #overlay p { margin: 4px 0; opacity: 0.8; }
-    #start { margin-top: 20px; font-size: 1.1rem; padding: 10px 28px; cursor: pointer; }
-    #start:disabled { background: #555; color: #999; cursor: not-allowed; }
-    #upload { margin-top: 14px; font-size: 1rem; padding: 8px 22px; cursor: pointer; }
-    #status { margin-top: 10px; opacity: 0.7; font-size: 0.9rem; }
-    button:disabled { background: #444; color: #777; cursor: not-allowed; }
+    body { margin: 0; overflow: hidden; font-family: sans-serif; }
   </style>
 </head>
 <body>
-  <div id="overlay">
-    <h1>Rhythm Sword</h1>
-    <p id="sub">Slice the cubes on the beat with the matching colored saber.<br>Perfect &le; 50ms &middot; Good &le; 100ms &middot; OK &le; 150ms.<br>Wrong saber = -100 points.</p>
-    <p>Enter VR, then press a controller trigger to start.<br>
-      <span style="opacity:.7">Testing on desktop: left click = red, right click = blue.</span></p>
-    <p>
-      <label for="demo">Demo: </label>
-      <select id="demo"></select>
-    </p>
-    <input type="file" id="file" accept="audio/*" hidden>
-    <button id="upload">Load MP3</button>
-    <button id="analyze" disabled>Analyze</button>
-    <button id="start" disabled>Start</button>
-    <p id="status">Loading demo song…</p>
-    <p id="system"></p>
-  </div>
+  <input type="file" id="file" accept="audio/*" hidden>
 
   <a-scene renderer="antialias:false" fog="type: linear; color: #000; near: 8; far: 160" mouse-slicer>
     <a-sky color="#0b0620"></a-sky>
@@ -47,15 +18,21 @@
     <a-entity id="landscape" landscape="speed: 14"></a-entity>
 
     <a-entity id="rig">
-      <a-camera id="cam" position="0 2.2 0"></a-camera>
+      <a-camera id="cam" position="0 2.2 0"
+                raycaster="objects: .ui-button; far: 60"
+                cursor="rayOrigin: mouse; fuse: false"></a-camera>
 
-      <a-entity hand-controls="hand: left" position="-0.3 1.3 -0.4">
+      <a-entity hand-controls="hand: left" position="-0.3 1.3 -0.4"
+                raycaster="objects: .ui-button; far: 30; showLine: false; lineColor: #ff3355"
+                cursor="fuse: false; downEvents: triggerdown, gripdown; upEvents: triggerup, gripup">
         <a-box id="blade-left" slicer="color: red" position="0 0 -0.45"
                width="0.03" height="0.03" depth="0.9"
                material="shader: flat; color: #ff3355"></a-box>
       </a-entity>
 
-      <a-entity hand-controls="hand: right" position="0.3 1.3 -0.4">
+      <a-entity hand-controls="hand: right" position="0.3 1.3 -0.4"
+                raycaster="objects: .ui-button; far: 30; showLine: false; lineColor: #33ccff"
+                cursor="fuse: false; downEvents: triggerdown, gripdown; upEvents: triggerup, gripup">
         <a-box id="blade-right" slicer="color: blue" position="0 0 -0.45"
                width="0.03" height="0.03" depth="0.9"
                material="shader: flat; color: #33ccff"></a-box>
@@ -64,14 +41,15 @@
       <a-entity id="hud" position="0 1.45 -2">
         <a-text id="score" value="" align="left" anchor="left" position="-2.1 1.55 0"
                 font="fonts/Orbitron-Bold.json" shader="msdf" color="#ffffff"
-                scale="0.6 0.6 1" look-at="#cam"></a-text>
+                scale="0.6 0.6 1"></a-text>
         <a-text id="combo" value="" align="right" anchor="right" position="2.1 1.55 0"
                 font="fonts/Orbitron-Bold.json" shader="msdf" color="#ffdd55"
-                scale="0.4 0.4 1" look-at="#cam"></a-text>
+                scale="0.4 0.4 1"></a-text>
       </a-entity>
     </a-entity>
 
     <a-entity id="notes"></a-entity>
+    <a-entity id="ui" ui-manager></a-entity>
   </a-scene>
 
   <script src="audio.js"></script>
@@ -82,17 +60,9 @@
   <script src="components/effects.js"></script>
   <script src="components/slicer.js"></script>
   <script src="components/mouse-slicer.js"></script>
+  <script src="components/ui.js"></script>
   <script src="components/game.js"></script>
   <script>
-    document.getElementById('start').addEventListener('click', function () {
-      window.Game.start();
-    });
-    document.getElementById('upload').addEventListener('click', function () {
-      // Start pulling the 2.4 MB analysis engine now, while the user is still
-      // in the file picker.
-      window.Analyzer.ensureEngine();
-      document.getElementById('file').click();
-    });
     document.getElementById('file').addEventListener('change', function () {
       window.Analyzer.handleFile(this.files[0]);
       this.value = '';

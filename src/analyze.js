@@ -1,16 +1,14 @@
 // Browser shell around ChartBuilder (shared/chart-builder.js): DOM status lines,
 // file loading/decoding, resampling, and the essentia engine lifecycle.
 (function () {
-  var statusEl = null;
-  var systemEl = null;
   var readyBuffer = null;
 
   function setStatus(text) {
-    if (statusEl) statusEl.textContent = text;
+    if (window.UI && window.UI.setStatus) window.UI.setStatus(text);
   }
 
   function setSystem(text) {
-    if (systemEl) systemEl.textContent = text;
+    if (window.UI && window.UI.setSystem) window.UI.setSystem(text);
   }
 
   var hooks = {
@@ -97,8 +95,6 @@
 
   window.Analyzer = {
     init: function () {
-      statusEl = document.getElementById('status');
-      systemEl = document.getElementById('system');
       setSystem('Analysis engine: essentia, loaded on demand');
     },
     ensureEngine: ensureEngine,
