@@ -1,0 +1,1062 @@
+// Beatmap analysis and chart shaping. Runs in the browser (as window.ChartBuilder)
+// and in Node (as a CommonJS module) from this one file — no build step.
+//
+// The host is responsible for everything this file deliberately does not touch:
+// decoding audio, resampling to SR, constructing the essentia instance, and
+// reporting progress. Pass an engine in for the essentia path or null for the
+// pure-FFT fallback; pass hooks to receive status/log/warn.
+(function (root, factory) {
+  var api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.ChartBuilder = api;
+})(typeof self !== 'undefined' ? self : this, function () {
+  var FFT_SIZE = 1024;
+  var HOP_S = 0.05;
+  var MIN_GAP = 0.22;
+  var THRESH = 0.12;
+  var F_MIN = 40;
+  var F_MAX = 12000;
+  var MAX_NOTES = 1000;
+  var CROSSOVER = 0.15;
+  var SR = 44100;
+
+  // Section-focus tuning. See computeSections/classifySections below.
+  var SECTION_WINDOW_S = 3.0;        // seconds averaged on each side of a novelty sample
+  var SECTION_MIN_GAP_S = 7;         // minimum section length
+  var SECTION_PERCENTILE = 0.96;     // a boundary is a novelty peak in the top ~4% for this song
+  var FOCUS_MELODY_PERC_MIN = 0.5;   // melody focus: drop percussion hits below this local strength
+  var FOCUS_SPARSE_MIN = 0.65;       // sparse focus: keep only real accents above this local strength
+  var FOCUS_MELODY_MIN_RUN = 0.15;   // melody focus: shorter melody runs qualify
+  var FOCUS_DEFAULT_MIN_RUN = 0.25;  // the pre-existing default elsewhere
+
+  var BANDS = [
+    { lo: 30, hi: 120 },
+    { lo: 120, hi: 300 },
+    { lo: 300, hi: 2000 },
+    { lo: 2000, hi: 6000 },
+    { lo: 6000, hi: 14000 }
+  ];
+
+  var NOOP = function () {};
+
+  function normHooks(hooks) {
+    hooks = hooks || {};
+    return {
+      status: hooks.status || NOOP,
+      log: hooks.log || NOOP,
+      warn: hooks.warn || NOOP
+    };
+  }
+
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function r3(v) { return Math.round(v * 1000) / 1000; }
+  function r2(v) { return Math.round(v * 100) / 100; }
+
+  // Emscripten throws bare heap pointers; dig the std::string message out of one.
+  function decodeWasmException(err, engine) {
+    try {
+      if (typeof err !== 'number' || !isFinite(err) || !engine || !engine.module) return null;
+      var heap = engine.module.HEAPU8;
+      var heap32 = engine.module.HEAPU32;
+      if (!heap || !heap32 || err + 40 >= heap.length) return null;
+      var size = heap32[(err + 8) >> 2];
+      if (!size || size > 4096) return null;
+      var base = size <= 22 ? err + 16 : heap32[(err + 16) >> 2];
+      if (typeof base !== 'number' || !isFinite(base)) return null;
+      var out = '';
+      for (var i = 0; i < size; i++) {
+        var c = heap[base + i];
+        if (c === 0) break;
+        out += String.fromCharCode(c);
+      }
+      return out || null;
+    } catch (e) { return null; }
+  }
+
+  function errText(err, engine) {
+    try {
+      if (err instanceof Error && err.message) return err.message;
+      if (err && err.message) return err.message;
+      var wasmMsg = decodeWasmException(err, engine);
+      if (wasmMsg) return wasmMsg;
+      return String(err);
+    } catch (e) { return 'unknown'; }
+  }
+
+  function sanitize(data) {
+    var i, v;
+    for (i = 0; i < data.length; i++) {
+      v = data[i];
+      if (v !== v || v === Infinity || v === -Infinity) data[i] = 0;
+    }
+    return data;
+  }
+
+  function mono(buffer) {
+    var ch = buffer.numberOfChannels;
+    var len = buffer.length;
+    var out = new Float32Array(len);
+    if (ch === 1) {
+      out.set(buffer.getChannelData(0));
+    } else {
+      var i, d = buffer.getChannelData(0);
+      for (i = 0; i < len; i++) out[i] = d[i];
+      for (var c = 1; c < ch; c++) {
+        d = buffer.getChannelData(c);
+        for (i = 0; i < len; i++) out[i] = (out[i] + d[i]) * 0.5;
+      }
+    }
+    return out;
+  }
+
+  function fft(re, im) {
+    var n = re.length;
+    var i, j, k, bit, len, half, ang, wRe, wIm, curRe, curIm, nRe, uRe, uIm, vRe, vIm, t;
+    for (i = 1, j = 0; i < n; i++) {
+      bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j |= bit;
+      if (i < j) {
+        t = re[i]; re[i] = re[j]; re[j] = t;
+        t = im[i]; im[i] = im[j]; im[j] = t;
+      }
+    }
+    for (len = 2; len <= n; len <<= 1) {
+      half = len >> 1;
+      ang = -2 * Math.PI / len;
+      wRe = Math.cos(ang);
+      wIm = Math.sin(ang);
+      for (i = 0; i < n; i += len) {
+        curRe = 1;
+        curIm = 0;
+        for (k = 0; k < half; k++) {
+          uRe = re[i + k];
+          uIm = im[i + k];
+          vRe = re[i + k + half] * curRe - im[i + k + half] * curIm;
+          vIm = re[i + k + half] * curIm + im[i + k + half] * curRe;
+          re[i + k] = uRe + vRe;
+          im[i + k] = uIm + vIm;
+          re[i + k + half] = uRe - vRe;
+          im[i + k + half] = uIm - vIm;
+          nRe = curRe * wRe - curIm * wIm;
+          curIm = curRe * wIm + curIm * wRe;
+          curRe = nRe;
+        }
+      }
+    }
+  }
+
+  function heightFor(type, u) {
+    switch (type) {
+      case 'kick': return 0.4;
+      case 'bass': return 0.45 + 0.5 * u;
+      case 'snare': return 1.05 + 0.5 * u;
+      case 'mid': return 1.7 + 0.5 * u;
+      case 'lead': return 2.25 + 0.35 * u;
+      case 'hat': return 2.6 + 0.25 * u;
+    }
+    return 1.7;
+  }
+
+  // The full span heightFor can produce (kick at the floor, hat at the ceiling).
+  // The editor clamps to these so a hand-placed note can reach anywhere a
+  // generated one can.
+  var Y_MIN = 0.4;
+  var Y_MAX = 2.85;
+
+  function baseColor(type) {
+    return (type === 'mid' || type === 'lead') ? 'blue' : 'red';
+  }
+
+  function bandFrames(data, sr, hop) {
+    var size = Math.min(FFT_SIZE, 4096);
+    var win = new Float32Array(size);
+    var i;
+    for (i = 0; i < size; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (size - 1));
+    var n = data.length;
+    var re = new Float32Array(size);
+    var im = new Float32Array(size);
+    var mags = new Float32Array(size / 2);
+    var frames = [];
+    var maxE = 0;
+    var start = 0;
+    while (start + size <= n) {
+      for (i = 0; i < size; i++) re[i] = data[start + i] * win[i];
+      im.fill(0);
+      fft(re, im);
+      var e = 0, sumC = 0, sumW = 0, logSum = 0;
+      for (i = 1; i < size / 2; i++) {
+        var m = Math.sqrt(re[i] * re[i] + im[i] * im[i]);
+        mags[i] = m;
+        e += m;
+        var f = i * sr / size;
+        if (f >= F_MIN && f <= F_MAX) { sumC += Math.log(f) * m; sumW += m; }
+        logSum += Math.log(m + 1e-9);
+      }
+      var flat = Math.exp(logSum / (size / 2 - 1)) / (e / (size / 2 - 1) + 1e-9);
+      var bands = [];
+      var tot = 0;
+      for (var b = 0; b < BANDS.length; b++) {
+        var bl = Math.max(1, Math.ceil(BANDS[b].lo * size / sr));
+        var bh = Math.min(size / 2, Math.floor(BANDS[b].hi * size / sr));
+        var s = 0;
+        for (var k = bl; k < bh; k++) s += mags[k];
+        bands.push(s);
+        tot += s;
+      }
+      frames.push({ e: e, bands: bands, tot: tot, flat: flat, logc: sumW > 0 ? sumC / sumW : Math.log(F_MIN) });
+      if (e > maxE) maxE = e;
+      start += hop;
+    }
+    var hopTime = hop / sr;
+    for (i = 1; i < frames.length - 1; i++) {
+      var fr = frames[i];
+      var total = fr.tot + 1e-9;
+      var onsetSharp = (fr.e - 0.5 * (frames[i - 1].e + frames[i + 1].e)) / (fr.e + 1e-9);
+      var perc = onsetSharp > 0.22 && fr.flat > 0.18;
+      var type;
+      if (perc) {
+        if (fr.bands[4] / total > 0.3) type = 'hat';
+        else if (fr.bands[0] / total > 0.3) type = 'kick';
+        else type = 'snare';
+      } else {
+        if (fr.bands[0] / total > 0.35) type = 'bass';
+        else if (fr.bands[2] >= fr.bands[3]) type = 'mid';
+        else type = 'lead';
+      }
+      var u = clamp((fr.logc - Math.log(F_MIN)) / (Math.log(F_MAX) - Math.log(F_MIN)), 0, 1);
+      fr.type = type;
+      fr.u = u;
+      fr.y = r2(heightFor(type, u));
+      fr.color = baseColor(type);
+    }
+    return { frames: frames, hopTime: hopTime, maxE: maxE };
+  }
+
+  function balance(arr) {
+    var r = 0, b = 0, i;
+    for (i = 0; i < arr.length; i++) arr[i].color === 'red' ? r++ : b++;
+    var flip = r > b * 1.4 ? 'red' : b > r * 1.4 ? 'blue' : '';
+    if (!flip) return;
+    var other = flip === 'red' ? 'blue' : 'red';
+    var cnt = 0;
+    for (i = 0; i < arr.length; i++) {
+      if (arr[i].color === flip) {
+        if (cnt % 2 === 0) arr[i].color = other;
+        cnt++;
+      }
+    }
+  }
+
+  function markTriplets(arr) {
+    for (var i = 1; i < arr.length - 1; i++) {
+      if (arr[i].mel) continue;
+      var g1 = arr[i].t - arr[i - 1].t;
+      var g2 = arr[i + 1].t - arr[i].t;
+      if (Math.abs(g1 - g2) < 0.035 && g1 < 0.35 && g2 < 0.35) {
+        var a = arr[i - 1], b = arr[i], c = arr[i + 1];
+        if (i % 2) {
+          a.color = 'blue'; b.color = 'red'; c.color = 'blue';
+        } else {
+          a.color = 'red'; b.color = 'blue'; c.color = 'red';
+        }
+        i += 2;
+      }
+    }
+  }
+
+  function thin(arr) {
+    var step = Math.ceil(arr.length / MAX_NOTES);
+    var out = [];
+    for (var i = 0; i < arr.length; i += step) out.push(arr[i]);
+    return out;
+  }
+
+  function assignLanes(arr) {
+    var prev = -1;
+    for (var i = 0; i < arr.length; i++) {
+      var nn = arr[i];
+      var side = nn.color === 'red' ? [0, 1] : [2, 3];
+      if (Math.random() < CROSSOVER) side = side[0] === 0 ? [2, 3] : [0, 1];
+      var lane = Math.random() < 0.5 ? side[0] : side[1];
+      if (lane === prev) lane = lane === side[0] ? side[1] : side[0];
+      nn.lane = lane;
+      prev = lane;
+    }
+  }
+
+  function assignLanesSplit(arr) {
+    var lastRed = -1, lastBlue = -1;
+    for (var i = 0; i < arr.length; i++) {
+      var nn = arr[i];
+      if (nn.color === 'red') {
+        nn.lane = lastRed === 0 ? 1 : 0;
+        lastRed = nn.lane;
+      } else {
+        nn.lane = lastBlue === 2 ? 3 : 2;
+        lastBlue = nn.lane;
+      }
+    }
+  }
+
+  function assemble(primary, melody, bpm) {
+    var all = primary.concat(melody);
+    all.sort(function (a, b) { return a.t - b.t; });
+    var out = [];
+    for (var i = 0; i < all.length; i++) {
+      if (out.length && all[i].t - out[out.length - 1].t < MIN_GAP) continue;
+      out.push(all[i]);
+    }
+    balance(out);
+    markTriplets(out);
+    if (out.length > MAX_NOTES) out = thin(out);
+    assignLanes(out);
+    var chart = [];
+    for (i = 0; i < out.length; i++) {
+      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y });
+    }
+    return { bpm: bpm, source: 'mp3', system: 'fft', notes: chart };
+  }
+
+  function balanceSplit(arr) {
+    var bucket = 8;
+    var bStart = -Infinity;
+    var reds = [], blues = [];
+
+    function flush() {
+      if (reds.length >= blues.length) { reds = []; blues = []; return; }
+      var toFlip = Math.floor((blues.length - reds.length) / 2);
+      if (toFlip <= 0) { reds = []; blues = []; return; }
+      var flipped = 0;
+      for (var k = 0; k < blues.length && flipped < toFlip; k++) {
+        var nn = arr[blues[k]];
+        if (nn.mel) continue;
+        var ok = true;
+        for (var r = 0; r < arr.length; r++) {
+          if (arr[r].color === 'red' && Math.abs(arr[r].t - nn.t) < MIN_GAP) { ok = false; break; }
+        }
+        if (!ok) continue;
+        nn.color = 'red';
+        flipped++;
+      }
+      reds = []; blues = [];
+    }
+
+    for (var i = 0; i < arr.length; i++) {
+      var nn = arr[i];
+      if (nn.t - bStart >= bucket) { flush(); bStart = nn.t; }
+      if (nn.color === 'red') reds.push(i); else blues.push(i);
+    }
+    flush();
+  }
+
+  function assembleSplit(primary, melody, bpm) {
+    var all = primary.concat(melody);
+    all.sort(function (a, b) { return a.t - b.t; });
+    var out = [];
+    var lastRedT = -Infinity, lastBlueT = -Infinity;
+    for (var i = 0; i < all.length; i++) {
+      var nn = all[i];
+      var lastT = nn.color === 'red' ? lastRedT : lastBlueT;
+      if (nn.t - lastT < MIN_GAP) continue;
+      out.push(nn);
+      if (nn.color === 'red') lastRedT = nn.t; else lastBlueT = nn.t;
+    }
+    if (out.length > MAX_NOTES) out = thin(out);
+    balanceSplit(out);
+    assignLanesSplit(out);
+    var chart = [];
+    for (i = 0; i < out.length; i++) {
+      chart.push({ t: out[i].t, lane: out[i].lane, color: out[i].color, y: out[i].y });
+    }
+    return { bpm: bpm, source: 'mp3', system: 'essentia', notes: chart };
+  }
+
+  function analyzeFft(data, sr, cb) {
+    var hop = Math.max(1, Math.round(sr * HOP_S));
+    var B = bandFrames(data, sr, hop);
+    var frames = B.frames;
+    var maxE = B.maxE;
+    var hopTime = B.hopTime;
+    var i;
+
+    var notes = [];
+    var gap = Math.max(1, Math.round(MIN_GAP / HOP_S));
+    var lastPeak = -Infinity;
+    for (i = 1; i < frames.length - 1; i++) {
+      var fr = frames[i];
+      if (fr.e < frames[i - 1].e || fr.e < frames[i + 1].e) continue;
+      if (fr.e < THRESH * maxE) continue;
+      if (i - lastPeak < gap) continue;
+      notes.push({ t: r3(i * hopTime), type: fr.type, u: fr.u, y: fr.y, color: fr.color });
+      lastPeak = i;
+    }
+
+    var melody = [];
+    var run = 0;
+    var lastVal = null;
+    var lastT = -Infinity;
+    for (i = 0; i < frames.length; i++) {
+      var fr2 = frames[i];
+      var t2 = i * hopTime;
+      var pitchy = fr2.flat < 0.22 &&
+        (fr2.bands[2] + fr2.bands[3]) > 0.4 * (fr2.tot + 1e-9) &&
+        fr2.e > 0.06 * maxE;
+      if (!pitchy) { run = 0; lastVal = null; continue; }
+      run++;
+      if (run < 8) continue;
+      var val = fr2.logc;
+      if (lastVal === null) { lastVal = val; continue; }
+      if (Math.abs(val - lastVal) > 0.06 * Math.abs(lastVal) && t2 - lastT >= 0.25) {
+        var melU = clamp((fr2.logc - Math.log(300)) / (Math.log(4000) - Math.log(300)), 0, 1);
+        melody.push({ t: r3(t2), y: r2(1.7 + 0.95 * melU), color: 'blue', mel: true });
+        lastT = t2;
+        lastVal = val;
+      }
+    }
+
+    cb(assemble(notes, melody, 0));
+  }
+
+  // Build an essentia instance and prove it actually works — broken WASM on weak
+  // devices fails here rather than halfway through an analysis. Returns null if
+  // unusable, and the caller falls back to analyzeFft.
+  function createEngine(Essentia, EssentiaWASM, hooks) {
+    var h = normHooks(hooks);
+    try {
+      if (!Essentia || !EssentiaWASM) return null;
+      var inst = new Essentia(EssentiaWASM);
+      var sane = false;
+      try {
+        var test = inst.arrayToVector(new Float32Array([0.1, 0.2, 0.3]));
+        var back = inst.vectorToArray(test);
+        try { test.delete(); } catch (e) {}
+        sane = back instanceof Float32Array && back.length === 3 && isFinite(back[0]);
+      } catch (e) {
+        h.warn('essentia sanity check failed: ' + errText(e, inst));
+      }
+      if (sane) return inst;
+      try { inst.delete(); } catch (e) {}
+      h.warn('essentia WASM unusable, using fallback analysis');
+    } catch (err) {
+      h.warn('essentia init failed, using fallback analysis: ' + errText(err));
+    }
+    return null;
+  }
+
+  function disposeEngine(engine) {
+    try {
+      if (engine && typeof engine.delete === 'function') engine.delete();
+    } catch (e) {}
+  }
+
+  function freeVector(vec) {
+    try {
+      if (vec && typeof vec.delete === 'function') vec.delete();
+    } catch (e) {}
+  }
+
+  function combineOnsets(engine, vec, h) {
+    var sum = null;
+    var n = 0;
+    var methods = ['infogain', 'hfc', 'flux'];
+    for (var m = 0; m < methods.length; m++) {
+      try {
+        var o = engine.OnsetDetectionGlobal(vec, 2048, 512, methods[m], SR);
+        var a = engine.vectorToArray(o.onsetDetections);
+        if (!sum) sum = new Float32Array(a.length);
+        if (a.length !== sum.length) continue;
+        for (var i = 0; i < a.length; i++) sum[i] += a[i];
+        n++;
+      } catch (err) {
+        h.warn('onset method ' + methods[m] + ' failed: ' + errText(err, engine));
+      }
+    }
+    if (!n || !sum) return null;
+    for (var j = 0; j < sum.length; j++) sum[j] /= n;
+    return sum;
+  }
+
+  function fluxOnsets(data) {
+    var hop = 512;
+    var B = bandFrames(data, SR, hop);
+    var frames = B.frames;
+    var hopTime = B.hopTime;
+    var o = new Float32Array(frames.length);
+    var i;
+    for (i = 1; i < frames.length - 1; i++) {
+      var d = frames[i].e - 0.5 * (frames[i - 1].e + frames[i + 1].e);
+      o[i] = d > 0 ? d : 0;
+    }
+    return { o: o, hopTime: hopTime, frames: frames, maxE: B.maxE };
+  }
+
+  function fluxBpm(o, hopTime) {
+    var maxLag = Math.round(2.0 / hopTime);
+    var minLag = Math.round(0.25 / hopTime);
+    var bestLag = 60 / 120, bestScore = -1;
+    for (var lag = minLag; lag <= maxLag; lag++) {
+      var s = 0;
+      for (var i = 0; i + lag < o.length; i++) s += o[i] * o[i + lag];
+      s /= (o.length - lag);
+      if (s > bestScore) { bestScore = s; bestLag = lag * hopTime; }
+    }
+    return 60 / bestLag;
+  }
+
+  function fluxBeats(o, hopTime, bpm) {
+    var grid = 60 / bpm;
+    var dur = o.length * hopTime;
+    var maxO = 0, i;
+    for (i = 0; i < o.length; i++) if (o[i] > maxO) maxO = o[i];
+    var first = -1;
+    for (i = 0; i < o.length; i++) {
+      if (o[i] > 0.5 * maxO) { first = i * hopTime; break; }
+    }
+    if (first < 0) return [];
+    var start = first - grid * Math.floor((first - 0.5) / grid);
+    if (start < 0.5) start += grid;
+    var beats = [];
+    var t = start;
+    while (t < dur - 0.25) { beats.push(r3(t)); t += grid; }
+    return beats;
+  }
+
+  function essentiaBpm(engine, vec, h) {
+    try {
+      var pb = engine.PercivalBpmEstimator(vec);
+      if (pb.bpm) {
+        h.log('BPM via essentia PercivalBpmEstimator: ' + Math.round(pb.bpm));
+        return pb.bpm;
+      }
+    } catch (err) {
+      h.warn('essentia PercivalBpmEstimator threw: ' + errText(err, engine));
+    }
+    try {
+      var cur = engine.RhythmExtractor2013(vec, 208, 'multifeature', 40);
+      if (cur.bpm) {
+        h.log('BPM via essentia RhythmExtractor2013: ' + Math.round(cur.bpm));
+        return cur.bpm;
+      }
+    } catch (err) {
+      h.warn('essentia RhythmExtractor2013 threw: ' + errText(err, engine));
+    }
+    return null;
+  }
+
+  // essentia gives us a BPM but not a beat-synced grid, so the grid itself comes
+  // from local flux tracking seeded with that BPM.
+  function detectBeats(data, engine, h) {
+    var env = fluxOnsets(data);
+    var vec = null;
+    var bpm = null;
+    try {
+      vec = engine.arrayToVector(data);
+      bpm = essentiaBpm(engine, vec, h);
+    } catch (err) {
+      h.warn('essentia vector init threw: ' + errText(err, engine));
+    }
+    if (!bpm) {
+      bpm = fluxBpm(env.o, env.hopTime);
+      h.log('BPM via flux autocorrelation: ' + Math.round(bpm));
+    }
+    if (!bpm) return null;
+    var beats = fluxBeats(env.o, env.hopTime, bpm);
+    if (beats.length < 3) {
+      h.warn('flux grid too sparse (' + beats.length + ' beats)');
+      return null;
+    }
+    h.log('beat grid from flux: ' + Math.round(bpm) + ' bpm, ' + beats.length + ' beats');
+    return { bpm: bpm, beats: beats, vec: vec, env: env };
+  }
+
+  // `data` must already be mono at SR. The setTimeout yields keep a browser tab
+  // responsive between the expensive stages; in Node they are simply harmless.
+  function analyzeEssentia(data, engine, hooks, cb) {
+    var h = normHooks(hooks);
+    var duration = data.length / SR;
+    var vec = null;
+
+    function fail() {
+      freeVector(vec);
+      h.status('Beat grid failed — using basic analysis (fallback FFT)...');
+      analyzeFft(data, SR, cb);
+    }
+
+    h.status('Finding the beat (flux + essentia BPM)...');
+    setTimeout(function () {
+      var res = detectBeats(data, engine, h);
+      if (!res) {
+        fail();
+        return;
+      }
+      vec = res.vec;
+      var beats = res.beats;
+      var bpm = res.bpm;
+      var env = res.env;
+      var pitch = null;
+      var onsetDet = null;
+
+      function finishBuild(beats2, bpm2, pitch2, onsetDet2) {
+        h.status('Building the beat map...');
+        setTimeout(function () {
+          var chart = null;
+          try {
+            chart = buildChart(data, SR, {
+              bpm: bpm2, beats: beats2, pitch: pitch2, onsetDet: onsetDet2,
+              duration: duration, env: env
+            });
+          } catch (err) {
+            h.warn('beat map build failed: ' + errText(err, engine));
+          }
+          freeVector(vec);
+          if (!chart) { fail(); return; }
+          if (chart.sections) {
+            h.log('sections: ' + chart.sections.map(function (s) {
+              return s.start.toFixed(1) + '-' + s.end.toFixed(1) + ' ' + s.focus;
+            }).join(' | '));
+          }
+          cb(chart);
+        }, 30);
+      }
+
+      if (vec) {
+        h.status('Tracking the melody (essentia)...');
+        setTimeout(function () {
+          try {
+            var mel = engine.PredominantPitchMelodia(vec);
+            pitch = engine.vectorToArray(mel.pitch);
+          } catch (err) {
+            h.warn('essentia melody analysis failed, continuing without melody: ' + errText(err, engine));
+          }
+          h.status('Detecting onsets (essentia)...');
+          setTimeout(function () {
+            try {
+              onsetDet = combineOnsets(engine, vec, h);
+            } catch (err) {
+              h.warn('essentia onset analysis failed, continuing without fills: ' + errText(err, engine));
+            }
+            finishBuild(beats, bpm, pitch, onsetDet);
+          }, 30);
+        }, 30);
+      } else {
+        h.status('Building the beat map...');
+        finishBuild(beats, bpm, pitch, onsetDet);
+      }
+    }, 30);
+  }
+
+  // One feature vector per frame: energy, spectral centroid, the 5 band
+  // ratios, and local onset density. Everything here is already computed by
+  // the caller (bandFrames/OnsetDetectionGlobal) — this is just a repackage.
+  function computeFeatureFrames(frames, onsetDet, onsetHopTime, hopTime) {
+    var out = new Array(frames.length);
+    var i, fr, tot, oi, vec;
+    for (i = 0; i < frames.length; i++) {
+      fr = frames[i];
+      tot = fr.tot + 1e-9;
+      // bandFrames only sets .u for frames 1..length-2 (it needs neighbors
+      // for the onset-sharpness calc); default the first/last frame to 0
+      // rather than leaving it undefined — a NaN here would poison every
+      // later prefix-sum entry for this dimension, since they're cumulative.
+      vec = [fr.e, fr.u || 0, fr.bands[0] / tot, fr.bands[1] / tot, fr.bands[2] / tot, fr.bands[3] / tot, fr.bands[4] / tot];
+      if (onsetDet) {
+        oi = Math.round((i * hopTime) / onsetHopTime);
+        vec.push(oi >= 0 && oi < onsetDet.length ? onsetDet[oi] : 0);
+      } else {
+        vec.push(0);
+      }
+      out[i] = vec;
+    }
+    return out;
+  }
+
+  // Novelty curve (Foote-style): at each frame, compare the average feature
+  // vector just before it to the average just after. A big jump means the
+  // song's character changed there — a pause, a riser building, a crash, a
+  // fill, a new instrument entering are all just cases of "this changed a
+  // lot." One generic mechanism instead of five bespoke detectors. Each
+  // feature dimension is min-max normalized across the whole song first, and
+  // windowed averages use prefix sums so the whole sweep is O(n), not O(n*W).
+  function computeNovelty(featVecs, hopTime, windowSec) {
+    var n = featVecs.length;
+    var dims = n ? featVecs[0].length : 0;
+    if (!n || !dims) return new Float32Array(0);
+
+    var mins = new Float32Array(dims);
+    var maxs = new Float32Array(dims);
+    var i, d, v;
+    for (d = 0; d < dims; d++) { mins[d] = Infinity; maxs[d] = -Infinity; }
+    for (i = 0; i < n; i++) {
+      for (d = 0; d < dims; d++) {
+        v = featVecs[i][d];
+        if (v < mins[d]) mins[d] = v;
+        if (v > maxs[d]) maxs[d] = v;
+      }
+    }
+    var ranges = new Float32Array(dims);
+    for (d = 0; d < dims; d++) ranges[d] = (maxs[d] - mins[d]) || 1;
+
+    var prefix = new Float32Array((n + 1) * dims);
+    for (i = 0; i < n; i++) {
+      for (d = 0; d < dims; d++) {
+        prefix[(i + 1) * dims + d] = prefix[i * dims + d] + (featVecs[i][d] - mins[d]) / ranges[d];
+      }
+    }
+
+    function avg(from, to) {
+      from = Math.max(0, from);
+      to = Math.min(n, to);
+      if (to <= from) return null;
+      var out = new Float32Array(dims);
+      for (var dd = 0; dd < dims; dd++) out[dd] = (prefix[to * dims + dd] - prefix[from * dims + dd]) / (to - from);
+      return out;
+    }
+
+    var win = Math.max(1, Math.round(windowSec / hopTime));
+    var novelty = new Float32Array(n);
+    var before, after, sum, diff;
+    for (i = 0; i < n; i++) {
+      before = avg(i - win, i);
+      after = avg(i, i + win);
+      if (!before || !after) continue;
+      sum = 0;
+      for (d = 0; d < dims; d++) { diff = after[d] - before[d]; sum += diff * diff; }
+      novelty[i] = Math.sqrt(sum);
+    }
+    return novelty;
+  }
+
+  // Local maxima of the novelty curve above an adaptive (per-song) threshold,
+  // at least SECTION_MIN_GAP_S apart. Relative to this song's own novelty
+  // range rather than a fixed number, same principle as the per-song
+  // waveform normalization used for the canyon walls.
+  //
+  // Candidates are picked strongest-first (non-max suppression), not by a
+  // left-to-right scan: a left-to-right scan just takes whichever candidate
+  // happens to come first in each minGapSec window, which — whenever the
+  // threshold lets more than a handful of frames through — degenerates into
+  // "a boundary every minGapSec like clockwork" rather than picking out the
+  // moments that actually stand out.
+  function pickBoundaries(novelty, hopTime, minGapSec, percentile) {
+    var n = novelty.length;
+    if (n < 3) return [];
+    var sorted = Array.prototype.slice.call(novelty).sort(function (a, b) { return a - b; });
+    var thresh = sorted[Math.min(n - 1, Math.floor(n * percentile))];
+
+    // A genuine structural peak stands out over roughly a bar's timescale —
+    // testing only immediate ±1-frame neighbors (11ms apart) means any tiny
+    // ripple riding on a sustained loud/dense stretch separately qualifies as
+    // its own "local max," and a whole elevated plateau ends up producing
+    // peaks packed wall-to-wall (so minGapSec becomes the only real limiter).
+    var localWin = Math.max(1, Math.round(1.5 / hopTime));
+    var candidates = [];
+    var i, lo, hi, k, isMax;
+    for (i = 0; i < n; i++) {
+      if (novelty[i] < thresh) continue;
+      lo = Math.max(0, i - localWin);
+      hi = Math.min(n - 1, i + localWin);
+      isMax = true;
+      for (k = lo; k <= hi; k++) {
+        if (k !== i && novelty[k] > novelty[i]) { isMax = false; break; }
+      }
+      if (isMax) candidates.push(i);
+    }
+    candidates.sort(function (a, b) { return novelty[b] - novelty[a]; });
+
+    var minGapFrames = Math.round(minGapSec / hopTime);
+    var accepted = [];
+    for (var c = 0; c < candidates.length; c++) {
+      var idx = candidates[c];
+      var tooClose = false;
+      for (var k = 0; k < accepted.length; k++) {
+        if (Math.abs(idx - accepted[k]) < minGapFrames) { tooClose = true; break; }
+      }
+      if (!tooClose) accepted.push(idx);
+    }
+    accepted.sort(function (a, b) { return a - b; });
+    return accepted.map(function (i2) { return i2 * hopTime; });
+  }
+
+  function buildSectionRanges(boundaryTimes, duration) {
+    var starts = [0].concat(boundaryTimes);
+    var sections = [];
+    for (var i = 0; i < starts.length; i++) {
+      var start = starts[i];
+      var end = (i + 1 < starts.length) ? starts[i + 1] : duration;
+      if (end - start < 0.5) continue;
+      sections.push({ start: start, end: end });
+    }
+    if (!sections.length) sections.push({ start: 0, end: duration });
+    return sections;
+  }
+
+  // Per section: how loud (energy), how melodic (fraction of frames with a
+  // confident pitch), how busy (onset rate) — each normalized against this
+  // song's own range across its sections. A simple decision picks the focus.
+  function classifySections(sections, frames, hopTime, onsetDet, onsetHopTime, pitch, melHop) {
+    var i, s, f0, f1, k, eSum, cnt, p0, p1, m, pCov, pCnt, o0, o1, o, oSum, oCnt;
+    for (i = 0; i < sections.length; i++) {
+      s = sections[i];
+      f0 = Math.max(0, Math.round(s.start / hopTime));
+      f1 = Math.min(frames.length, Math.round(s.end / hopTime));
+      eSum = 0; cnt = 0;
+      for (k = f0; k < f1; k++) { eSum += frames[k].e; cnt++; }
+      s.energyAvg = cnt ? eSum / cnt : 0;
+
+      pCov = 0; pCnt = 0;
+      if (pitch) {
+        p0 = Math.max(0, Math.floor(s.start / melHop));
+        p1 = Math.min(pitch.length, Math.floor(s.end / melHop));
+        for (m = p0; m < p1; m++) { if (pitch[m] > 0) pCov++; pCnt++; }
+      }
+      s.pitchCoverage = pCnt ? pCov / pCnt : 0;
+
+      oSum = 0; oCnt = 0;
+      if (onsetDet) {
+        o0 = Math.max(0, Math.round(s.start / onsetHopTime));
+        o1 = Math.min(onsetDet.length, Math.round(s.end / onsetHopTime));
+        for (o = o0; o < o1; o++) { oSum += onsetDet[o]; oCnt++; }
+      }
+      s.percRaw = oCnt ? oSum / oCnt : 0;
+    }
+
+    var eMax = 0, pMax = 0;
+    for (i = 0; i < sections.length; i++) {
+      if (sections[i].energyAvg > eMax) eMax = sections[i].energyAvg;
+      if (sections[i].percRaw > pMax) pMax = sections[i].percRaw;
+    }
+    eMax = eMax || 1; pMax = pMax || 1;
+
+    for (i = 0; i < sections.length; i++) {
+      s = sections[i];
+      var energyNorm = s.energyAvg / eMax;
+      var percNorm = s.percRaw / pMax;
+      var pitchCov = s.pitchCoverage;
+
+      if (energyNorm < 0.22) s.focus = 'sparse';
+      else if (pitchCov > 0.5 && pitchCov > percNorm * 1.3) s.focus = 'melody';
+      else if (percNorm > 0.45 && percNorm > pitchCov * 1.3) s.focus = 'percussion';
+      else s.focus = 'mixed';
+    }
+    return sections;
+  }
+
+  function focusAt(sections, t) {
+    for (var i = 0; i < sections.length; i++) {
+      if (t >= sections[i].start && t < sections[i].end) return sections[i].focus;
+    }
+    return 'mixed';
+  }
+
+  function buildChart(data, sr, es) {
+    var hop = 512;
+    var B = es.env || bandFrames(data, sr, hop);
+    var frames = B.frames;
+    var maxE = B.maxE;
+    var hopTime = B.hopTime;
+    var dur = es.duration;
+
+    var beats = es.beats;
+    var bpm = es.bpm;
+    var grid = 60 / bpm;
+    var i;
+
+    if (!frames.length) return assembleSplit([], [], bpm);
+
+    var onHopTime = 512 / SR;
+    var melHop = 128 / SR;
+
+    var sections = classifySections(
+      buildSectionRanges(
+        pickBoundaries(
+          computeNovelty(computeFeatureFrames(frames, es.onsetDet, onHopTime, hopTime), hopTime, SECTION_WINDOW_S),
+          hopTime, SECTION_MIN_GAP_S, SECTION_PERCENTILE
+        ),
+        dur
+      ),
+      frames, hopTime, es.onsetDet, onHopTime, es.pitch, melHop
+    );
+
+    function frameAt(t) {
+      var idx = Math.round(t / hopTime);
+      if (idx < 0) idx = 0;
+      if (idx >= frames.length) idx = frames.length - 1;
+      return frames[idx];
+    }
+
+    function localMax(t) {
+      var win = Math.round(1.2 / hopTime);
+      var c = Math.round(t / hopTime);
+      var lo = Math.max(0, c - win);
+      var hi = Math.min(frames.length - 1, c + win);
+      var m = 0;
+      for (var k = lo; k <= hi; k++) if (frames[k].e > m) m = frames[k].e;
+      return m;
+    }
+
+    function classifyEvent(t) {
+      var fr = frameAt(t);
+      if (!fr) return null;
+      var lm = localMax(t);
+      if (fr.e < THRESH * lm) return null;
+      if (fr.e < 0.02 * maxE) return null;
+      return { t: r3(t), type: fr.type, u: fr.u, y: fr.y, color: fr.color, strength: lm > 0 ? fr.e / lm : 0 };
+    }
+
+    var primary = [];
+    var lastT = -Infinity;
+    for (i = 0; i < beats.length; i++) {
+      var t = beats[i];
+      if (t >= dur - 0.25) break;
+      if (t < 0.25) continue;
+      var ev = classifyEvent(t);
+      if (!ev) continue;
+      if (t - lastT < MIN_GAP) continue;
+
+      var focus = focusAt(sections, t);
+      if (focus === 'melody' && ev.strength < FOCUS_MELODY_PERC_MIN) continue;
+      if (focus === 'sparse' && ev.strength < FOCUS_SPARSE_MIN) continue;
+
+      primary.push(ev);
+      lastT = t;
+    }
+
+    // Off-beat onsets become fills, snapped to the grid and rate-limited so a
+    // busy passage cannot bury the player.
+    if (es.onsetDet) {
+      var on = es.onsetDet;
+      var cnt = on.length;
+      var maxO = 0;
+      for (i = 0; i < cnt; i++) if (on[i] > maxO) maxO = on[i];
+      var winF = Math.max(4, Math.round(1.0 / onHopTime));
+      var base = new Float32Array(cnt);
+      var acc = 0;
+      for (i = 0; i < cnt; i++) {
+        acc += on[i];
+        if (i >= winF) acc -= on[i - winF];
+        base[i] = acc / Math.min(i + 1, winF);
+      }
+      var cands = [];
+      for (i = 2; i < cnt - 1; i++) {
+        if (on[i] <= on[i - 1] || on[i] <= on[i + 1]) continue;
+        if (on[i] < 2.0 * base[i] || on[i] < 0.05 * maxO) continue;
+        var t0 = i * onHopTime;
+        if (t0 < 0.5 || t0 > dur - 0.5) continue;
+        var nearBeat = false;
+        for (var b = 0; b < beats.length; b++) {
+          if (Math.abs(t0 - beats[b]) < 0.12) { nearBeat = true; break; }
+        }
+        if (nearBeat) continue;
+        var snap = bpm > 145 ? grid : grid / 2;
+        var ts = Math.round(t0 / snap) * snap;
+        if (ts < 0.5 || ts > dur - 0.5) continue;
+        var ev2 = classifyEvent(t0);
+        if (!ev2) continue;
+        // Fills are a percussion phenomenon — leave melody/sparse sections clear.
+        var fillFocus = focusAt(sections, ts);
+        if (fillFocus === 'melody' || fillFocus === 'sparse') continue;
+        cands.push({ t: r3(ts), y: ev2.y, color: ev2.color, strength: on[i] });
+      }
+      cands.sort(function (a, b) { return a.t - b.t; });
+      lastT = -Infinity;
+      var windowCount = 0;
+      var windowStart = -Infinity;
+      for (i = 0; i < cands.length; i++) {
+        var c = cands[i];
+        if (c.t - lastT < 0.14) continue;
+        if (c.t - windowStart >= 0.6) { windowCount = 0; windowStart = c.t; }
+        if (windowCount >= 4) continue;
+        primary.push(c);
+        lastT = c.t;
+        windowCount++;
+      }
+    }
+
+    // Sustained melody notes become blue notes at a height tracking their pitch.
+    var melody = [];
+    if (es.pitch) {
+      var p = es.pitch;
+      var runSem = -999;
+      var runStart = -1;
+      var lastM = -Infinity;
+
+      function flushMel(endIdx) {
+        if (runSem < 0) return;
+        var startT = runStart * melHop;
+        var endT = endIdx * melHop;
+        var dlen = endT - startT;
+        var focus = focusAt(sections, startT);
+        var minRun = focus === 'melody' ? FOCUS_MELODY_MIN_RUN : FOCUS_DEFAULT_MIN_RUN;
+        if (dlen >= minRun) {
+          var midF = 55 * Math.pow(2, runSem / 12);
+          var u2 = clamp((Math.log(midF) - Math.log(80)) / (Math.log(2500) - Math.log(80)), 0, 1);
+          var y2 = r2(1.75 + 0.95 * u2);
+
+          function addMel(tm) {
+            if (tm > 0.5 && tm < dur - 0.5 && tm - lastM >= 0.28) {
+              melody.push({ t: r3(tm), y: y2, color: 'blue', mel: true });
+              lastM = tm;
+            }
+          }
+
+          addMel(startT);
+          // Percussion focus thins melody to just each run's onset, not the
+          // in-run densification below, so percussion carries the section.
+          if (dlen >= 0.8 && focus !== 'percussion') {
+            var snap = grid;
+            for (var tm2 = startT + snap; tm2 < endT - 0.2; tm2 += snap) addMel(tm2);
+          }
+        }
+        runSem = -999;
+        runStart = -1;
+      }
+
+      for (var j = 0; j < p.length; j++) {
+        var f = p[j];
+        if (f <= 0) { flushMel(j); continue; }
+        var sem = Math.round(12 * Math.log2(f / 55));
+        if (sem !== runSem) { flushMel(j); runSem = sem; runStart = j; }
+      }
+      flushMel(p.length);
+    }
+
+    var chart = assembleSplit(primary, melody, bpm);
+    chart.sections = sections.map(function (s) { return { start: r2(s.start), end: r2(s.end), focus: s.focus }; });
+    return chart;
+  }
+
+  // Per-20s red/blue counts — the quickest way to spot a chart that has gone
+  // one-handed partway through a song.
+  function colorMix(chart) {
+    var buckets = {}, k;
+    for (k = 0; k < chart.notes.length; k++) {
+      var nn = chart.notes[k];
+      var b = Math.floor(nn.t / 20) * 20;
+      buckets[b] = buckets[b] || { red: 0, blue: 0 };
+      if (nn.color === 'red') buckets[b].red++; else buckets[b].blue++;
+    }
+    var parts = [];
+    if (chart.notes.length) {
+      for (k = 0; k <= Math.floor(chart.notes[chart.notes.length - 1].t / 20) * 20; k += 20) {
+        if (buckets[k]) parts.push(k + 's:R' + buckets[k].red + '/B' + buckets[k].blue);
+      }
+    }
+    return parts.join('  ');
+  }
+
+  return {
+    SR: SR,
+    MAX_NOTES: MAX_NOTES,
+    Y_MIN: Y_MIN,
+    Y_MAX: Y_MAX,
+    mono: mono,
+    sanitize: sanitize,
+    errText: errText,
+    createEngine: createEngine,
+    disposeEngine: disposeEngine,
+    analyzeFft: analyzeFft,
+    analyzeEssentia: analyzeEssentia,
+    colorMix: colorMix
+  };
+});

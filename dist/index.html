@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Rhythm Sword</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; }
+  </style>
+</head>
+<body>
+  <input type="file" id="file" accept="audio/*" hidden>
+
+  <a-scene renderer="antialias:false" fog="type: linear; color: #000; near: 8; far: 160" mouse-slicer>
+    <a-sky color="#0b0620"></a-sky>
+
+    <a-entity id="landscape" landscape="speed: 14"></a-entity>
+
+    <a-entity id="rig">
+      <a-camera id="cam" position="0 2.2 0"
+                raycaster="objects: .ui-button; far: 60"
+                cursor="rayOrigin: mouse; fuse: false"></a-camera>
+
+      <a-entity hand-controls="hand: left" position="-0.3 1.3 -0.4"
+                raycaster="objects: .ui-button; far: 30; showLine: false; lineColor: #ff3355"
+                cursor="fuse: false; downEvents: triggerdown, gripdown; upEvents: triggerup, gripup">
+        <a-box id="blade-left" slicer="color: red" position="0 0 -0.45"
+               width="0.03" height="0.03" depth="0.9"
+               material="shader: flat; color: #ff3355"></a-box>
+      </a-entity>
+
+      <a-entity hand-controls="hand: right" position="0.3 1.3 -0.4"
+                raycaster="objects: .ui-button; far: 30; showLine: false; lineColor: #33ccff"
+                cursor="fuse: false; downEvents: triggerdown, gripdown; upEvents: triggerup, gripup">
+        <a-box id="blade-right" slicer="color: blue" position="0 0 -0.45"
+               width="0.03" height="0.03" depth="0.9"
+               material="shader: flat; color: #33ccff"></a-box>
+      </a-entity>
+
+      <a-entity id="hud" position="0 1.45 -2">
+        <a-text id="score" value="" align="left" anchor="left" position="-2.1 1.55 0"
+                font="fonts/Orbitron-Bold.json" shader="msdf" color="#ffffff"
+                scale="0.6 0.6 1" hud-punch></a-text>
+        <a-text id="combo" value="" align="right" anchor="right" position="2.1 1.55 0"
+                font="fonts/Orbitron-Bold.json" shader="msdf" color="#ffdd55"
+                scale="0.4 0.4 1" hud-punch></a-text>
+      </a-entity>
+    </a-entity>
+
+    <a-entity id="notes"></a-entity>
+    <a-entity id="ui" ui-manager></a-entity>
+  </a-scene>
+
+  <script src="audio.js"></script>
+  <script src="shared/chart-builder.js"></script>
+  <script src="analyze.js"></script>
+  <script src="components/landscape.js"></script>
+  <script src="components/note.js"></script>
+  <script src="components/effects.js"></script>
+  <script src="components/slicer.js"></script>
+  <script src="components/mouse-slicer.js"></script>
+  <script src="components/ui.js"></script>
+  <script src="components/game.js"></script>
+  <script>
+    document.getElementById('file').addEventListener('change', function () {
+      window.Analyzer.handleFile(this.files[0]);
+      this.value = '';
+    });
+  </script>
+</body>
+</html>
